@@ -1,69 +1,62 @@
-# Time Series Anomaly Intelligence
+# 시계열 이상탐지 분석 대시보드
 
-Project 2 submission app for time series analysis.
+시계열분석 프로젝트 2 제출용 Streamlit 웹앱입니다.
 
-## Goal
+## 목표
 
-Upload any multivariate CSV, choose a time column and one numeric value column, and automatically detect time series anomalies. The dashboard helps judge whether detected anomalies are reasonable by showing the original series, anomaly points, score distribution, component scores, evaluation indicators, anomaly type, explanation, and recommended review action.
+다변량 CSV 파일을 업로드하면 날짜/시간 컬럼과 수치형 컬럼을 자동으로 후보 탐지하고, 사용자가 선택한 대상 시계열에 대해 이상치를 자동 탐지합니다. 단순히 이상치를 표시하는 데서 끝나지 않고, 탐지 근거, 이상치 유형, 시각화 해석, 데이터 품질 점검, 권장 검토 조치까지 함께 보여주는 분석 대시보드입니다.
 
-The web app introduction video is intentionally excluded because it will be recorded separately.
+웹앱 소개 동영상은 별도로 직접 녹화할 예정이므로 이 저장소에는 포함하지 않습니다.
 
-## Differentiation Strategy
+## 주요 기능
 
-Project 1 lost points because the differentiation function/UI score was 0. This version directly addresses that feedback.
-
-Most basic submissions can stop at "upload CSV -> detect anomaly -> show chart." This app adds an interpretation layer:
-
-- anomaly type classification: spike/drop, level deviation, volatility burst, seasonality residual, mixed signal
-- method agreement count: shows how many detection methods supported the anomaly
-- context-column root-cause hints: optional extra numeric columns are used as supporting signals
-- action-oriented review board: each anomaly receives a reason and a recommended analyst action
-- differentiation tab: explicitly states how the app differs from a baseline anomaly dashboard
-- downloadable explanation report, not only a raw result CSV
-
-## Main Features
-
-- CSV upload with automatic datetime and numeric column candidate detection
-- Optional context columns for multivariate anomaly interpretation
-- Re-analysis whenever a different file, column, frequency, or detection setting is selected
-- Ensemble anomaly detection using:
+- CSV 업로드 및 날짜/수치 컬럼 자동 인식
+- 다변량 CSV의 추가 수치 컬럼을 참고 변수로 선택 가능
+- 파일, 컬럼, 주기, 탐지 설정 변경 시 자동 재분석
+- 업로드 데이터별 자동 분석 브리핑 제공
+- 점수 추이, 점수 분포, 탐지 기준별 점수에 대한 시각화 해석 가이드 제공
+- 결측치, 중복 시점, 시간 주기, 정상성, 이상치 비율에 대한 데이터 품질 점검
+- 앙상블 이상탐지 방식
   - rolling z-score
   - rolling IQR distance
   - STL residual score
   - multifeature Isolation Forest score
-- Dashboard visualizations for time series, anomaly score, score distribution, method component scores, and anomaly type counts
-- Anomaly review table with reason, context note, and recommended action
-- Evaluation indicators:
-  - anomaly count and rate
-  - mean, standard deviation, coefficient of variation
-  - missing values before interpolation
-  - lag-1 autocorrelation
+- 시계열 그래프, 이상 점수, 점수 분포, 탐지 기준별 점수, 이상치 유형 분포 시각화
+- 이상치별 유형, 탐지 근거, 참고 변수 해석, 권장 검토 조치 제공
+- 주요 평가 지표 제공
+  - 이상치 개수와 비율
+  - 평균, 표준편차, 변동계수
+  - 보간 전 결측치 수
+  - 1시차 자기상관
   - ADF p-value
-  - trend and seasonality strength
-- CSV export and markdown report export
-- Built-in sample data, so the app runs even before a user uploads a file
+  - 추세 강도와 계절성 강도
+- 이상탐지 결과 CSV 다운로드
+- 분석 리포트 Markdown 다운로드
+- 업로드 파일이 없어도 실행 가능한 내장 샘플 데이터 제공
 
-## Run Locally
+## 로컬 실행 방법
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-If you run the file with `python app.py`, the app now redirects itself to Streamlit automatically. Still, `streamlit run app.py` is the recommended command.
+`python app.py`로 실행해도 자동으로 Streamlit 실행으로 전환되도록 처리했습니다. 그래도 시연과 배포 전 확인에는 `streamlit run app.py` 명령을 권장합니다.
 
-## Online Deployment
+## 온라인 배포 방법
 
-Recommended deployment path:
+권장 배포 흐름:
 
-1. Create a GitHub repository under `https://github.com/KTH19991213`.
-2. Upload this `project2_anomaly_app` folder.
-3. Deploy with Streamlit Community Cloud.
-4. Set the app entry point to `app.py`.
+1. `https://github.com/KTH19991213` 계정에 새 GitHub 저장소를 생성합니다.
+2. `project2_anomaly_app` 폴더 안의 파일을 업로드합니다.
+3. Streamlit Community Cloud에서 해당 저장소를 연결합니다.
+4. 앱 실행 파일 경로를 `app.py`로 설정합니다.
 
-## Expected CSV Format
+저장소 루트에 폴더째 업로드했다면 실행 파일 경로는 `project2_anomaly_app/app.py`로 지정합니다.
 
-The app accepts flexible CSV files, but it works best with:
+## 권장 CSV 형식
+
+앱은 다양한 CSV 형식을 허용하지만, 아래와 같은 구조에서 가장 안정적으로 작동합니다.
 
 ```csv
 date,value
@@ -71,4 +64,4 @@ date,value
 2026-01-02,73.4
 ```
 
-For multivariate CSV files, upload the file, select the desired numeric target column, and optionally select additional numeric context columns in the sidebar.
+다변량 CSV의 경우 업로드 후 사이드바에서 분석 대상 수치 컬럼을 선택하고, 필요하다면 추가 수치 컬럼을 참고 변수로 선택하면 됩니다.

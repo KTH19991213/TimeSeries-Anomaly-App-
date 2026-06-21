@@ -45,16 +45,6 @@ streamlit run app.py
 
 `python app.py`로 실행해도 자동으로 Streamlit 실행으로 전환되도록 처리했습니다. 그래도 시연과 배포 전 확인에는 `streamlit run app.py` 명령을 권장합니다.
 
-## 온라인 배포 방법
-
-권장 배포 흐름:
-
-1. `https://github.com/KTH19991213` 계정에 새 GitHub 저장소를 생성합니다.
-2. `project2_anomaly_app` 폴더 안의 파일을 업로드합니다.
-3. Streamlit Community Cloud에서 해당 저장소를 연결합니다.
-4. 앱 실행 파일 경로를 `app.py`로 설정합니다.
-
-저장소 루트에 폴더째 업로드했다면 실행 파일 경로는 `project2_anomaly_app/app.py`로 지정합니다.
 
 ## 권장 CSV 형식
 

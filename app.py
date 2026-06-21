@@ -16,7 +16,7 @@ from statsmodels.tsa.seasonal import STL
 from statsmodels.tsa.stattools import acf, adfuller
 
 
-APP_TITLE = "Time Series Anomaly Intelligence"
+APP_TITLE = "시계열 이상탐지 분석 대시보드"
 
 
 @dataclass
@@ -247,7 +247,7 @@ def detect_anomalies(series: pd.Series, config: DetectionConfig, context: pd.Dat
     result["severity"] = pd.cut(
         result["anomaly_score"],
         bins=[-np.inf, threshold, threshold * 1.35, threshold * 1.85, np.inf],
-        labels=["normal", "watch", "warning", "critical"],
+        labels=["정상", "관찰", "주의", "위험"],
         include_lowest=True,
     ).astype(str)
     result = add_explanations(result, series, config, context)
@@ -283,27 +283,27 @@ def add_explanations(
         global_vol = series.diff().abs().mean()
 
         if abs(prev_delta) > 2 * (local_std if np.isfinite(local_std) else 1) and abs(next_delta) > abs(prev_delta) * 0.5:
-            anomaly_type = "single-point spike/drop"
+            anomaly_type = "단일 시점 급등/급락"
         elif abs(delta) > 2.5 * (local_std if np.isfinite(local_std) else 1):
-            anomaly_type = "level deviation"
+            anomaly_type = "수준 이탈"
         elif np.isfinite(local_vol) and local_vol > global_vol * 1.8:
-            anomaly_type = "volatility burst"
+            anomaly_type = "변동성 급증"
         elif row["stl_score"] >= max(row["rolling_z"], 2.5):
-            anomaly_type = "seasonality residual"
+            anomaly_type = "계절성 잔차 이상"
         else:
-            anomaly_type = "mixed signal"
+            anomaly_type = "복합 신호"
 
         reason_bits = [
-            f"value is {direction} local baseline by {delta:.2f}",
-            f"ensemble score {row['anomaly_score']:.2f}",
-            f"{int(row['method_votes'])} of 4 methods agreed",
+            f"국소 기준선 대비 {'높음' if direction == 'above' else '낮음'}: {delta:.2f}",
+            f"종합 이상 점수 {row['anomaly_score']:.2f}",
+            f"4개 기준 중 {int(row['method_votes'])}개가 이상 신호로 판단",
         ]
         if row["stl_score"] >= 2.5:
-            reason_bits.append("seasonal pattern did not explain it")
+            reason_bits.append("반복 계절 패턴만으로 설명하기 어려움")
         if row["isolation_score"] >= 2.2:
-            reason_bits.append("multifeature pattern looked unusual")
+            reason_bits.append("다변량 패턴 관점에서도 비정상적")
 
-        note = context_signal_note(context, i) if context is not None and not context.empty else "no context columns selected"
+        note = context_signal_note(context, i) if context is not None and not context.empty else "참고 변수 미선택"
         context_notes.append(note)
         anomaly_types.append(anomaly_type)
         reasons.append("; ".join(reason_bits))
@@ -323,21 +323,21 @@ def context_signal_note(context: pd.DataFrame, row_index: int) -> str:
     for col in context.columns:
         z = robust_z_score(context[col]).iloc[row_index]
         if abs(z) >= 2:
-            direction = "high" if z > 0 else "low"
-            notes.append(f"{col} is unusually {direction}")
-    return "; ".join(notes) if notes else "context columns look normal"
+            direction = "높음" if z > 0 else "낮음"
+            notes.append(f"{col} 값이 평소보다 {direction}")
+    return "; ".join(notes) if notes else "참고 변수에서 특이 신호 없음"
 
 
 def recommended_action(mode: str, anomaly_type: str, direction: str, context_note: str) -> str:
-    if mode == "Demand / Sales":
+    if mode in {"Demand / Sales", "수요/매출"}:
         if direction == "above":
-            return "Check promotion, holiday, stockout risk, and whether the demand jump should update the forecast."
-        return "Check missing sales, stockout, price change, or demand drop before treating this as normal seasonality."
-    if mode == "Operations / Sensor":
-        return "Inspect sensor logs, maintenance history, and adjacent measurements before accepting this point."
-    if mode == "Finance / Risk":
-        return "Confirm transaction source, calendar event, and one-off accounting effects before excluding the point."
-    return "Review source data, nearby observations, and context variables before deciding whether to remove or keep it."
+            return "프로모션, 휴일 효과, 재고 부족 가능성, 예측 기준 상향 필요성을 확인하세요."
+        return "매출 누락, 재고 부족, 가격 변경, 수요 감소 요인을 확인한 뒤 정상 계절성인지 판단하세요."
+    if mode in {"Operations / Sensor", "운영/센서"}:
+        return "센서 로그, 유지보수 이력, 인접 측정값을 함께 확인한 뒤 이상 여부를 확정하세요."
+    if mode in {"Finance / Risk", "금융/리스크"}:
+        return "거래 출처, 달력 이벤트, 일회성 회계 효과를 확인한 뒤 제외 여부를 판단하세요."
+    return "원천 데이터, 주변 관측치, 참고 변수를 함께 검토한 뒤 제거/유지 여부를 결정하세요."
 
 
 def describe_series(series: pd.Series, detected: pd.DataFrame, meta: dict[str, float | int | str]) -> pd.DataFrame:
@@ -355,21 +355,190 @@ def describe_series(series: pd.Series, detected: pd.DataFrame, meta: dict[str, f
     if len(values) >= 3 and values.nunique() > 1:
         lag1 = float(acf(values, nlags=1, fft=False)[1])
     rows = [
-        ("points", len(values), "number of observations used"),
-        ("anomaly_count", anomaly_count, "number of detected anomalies"),
-        ("anomaly_rate", anomaly_count / max(len(values), 1), "share of anomalous observations"),
-        ("mean", values.mean(), "average level"),
-        ("std", values.std(ddof=0), "volatility"),
-        ("cv", values.std(ddof=0) / (abs(values.mean()) + 1e-9), "volatility relative to mean"),
-        ("min", values.min(), "minimum value"),
-        ("max", values.max(), "maximum value"),
-        ("missing_before_interpolation", meta["missing_values"], "missing values before interpolation"),
-        ("lag1_autocorrelation", lag1, "lag-1 autocorrelation"),
-        ("adf_p_value", adf_p, "stationarity test p-value"),
-        ("trend_strength", trend_strength, "strength of trend component"),
-        ("seasonality_strength", seasonality_strength, "strength of seasonal component"),
+        ("관측치 수", len(values), "분석에 사용된 시계열 관측치 개수"),
+        ("이상치 수", anomaly_count, "탐지된 이상치 개수"),
+        ("이상치 비율", anomaly_count / max(len(values), 1), "전체 관측치 중 이상치 비율"),
+        ("평균", values.mean(), "시계열의 평균 수준"),
+        ("표준편차", values.std(ddof=0), "값의 변동성"),
+        ("변동계수", values.std(ddof=0) / (abs(values.mean()) + 1e-9), "평균 대비 상대 변동성"),
+        ("최솟값", values.min(), "관측값의 최솟값"),
+        ("최댓값", values.max(), "관측값의 최댓값"),
+        ("보간 전 결측치", meta["missing_values"], "선형 보간 전 결측값 개수"),
+        ("1시차 자기상관", lag1, "직전 시점과 현재 시점의 상관 정도"),
+        ("ADF p-value", adf_p, "정상성 검정 p-value"),
+        ("추세 강도", trend_strength, "추세 성분의 상대적 강도"),
+        ("계절성 강도", seasonality_strength, "계절 성분의 상대적 강도"),
     ]
-    return pd.DataFrame(rows, columns=["metric", "value", "meaning"])
+    return pd.DataFrame(rows, columns=["지표", "값", "의미"])
+
+
+def metric_value(metrics: pd.DataFrame, name: str) -> float:
+    match = metrics.loc[metrics["지표"] == name, "값"]
+    if match.empty:
+        return np.nan
+    return float(match.iloc[0])
+
+
+def generate_analysis_briefing(
+    series: pd.Series,
+    detected: pd.DataFrame,
+    metrics: pd.DataFrame,
+    value_col: str,
+    config: DetectionConfig,
+    context_cols: list[str],
+) -> str:
+    anomalies = detected[detected["is_anomaly"]].sort_values("anomaly_score", ascending=False)
+    start = series.index.min().strftime("%Y-%m-%d")
+    end = series.index.max().strftime("%Y-%m-%d")
+    anomaly_count = int(metric_value(metrics, "이상치 수"))
+    anomaly_rate = metric_value(metrics, "이상치 비율")
+    trend_strength = metric_value(metrics, "추세 강도")
+    seasonality_strength = metric_value(metrics, "계절성 강도")
+    lag1 = metric_value(metrics, "1시차 자기상관")
+    cv = metric_value(metrics, "변동계수")
+
+    if series.iloc[-1] > series.iloc[0]:
+        direction = "상승"
+    elif series.iloc[-1] < series.iloc[0]:
+        direction = "하락"
+    else:
+        direction = "횡보"
+
+    if anomaly_count == 0:
+        anomaly_sentence = "현재 설정에서는 이상치가 탐지되지 않았습니다."
+        review_sentence = "현재 임계값은 이 데이터에 대해 비교적 보수적으로 작동하고 있습니다."
+    else:
+        top = anomalies.iloc[0]
+        anomaly_sentence = (
+            f"총 {anomaly_count}개의 이상치가 탐지되었습니다(전체의 {anomaly_rate:.1%}). "
+            f"가장 강한 이상 신호는 {top['timestamp'].strftime('%Y-%m-%d')}이며 "
+            f"값은 {top['value']:.2f}, 유형은 {top['anomaly_type']}입니다."
+        )
+        review_sentence = (
+            f"주요 검토 포인트: {top['recommended_action']} "
+            f"탐지 근거: {top['reason']}."
+        )
+
+    structure_bits: list[str] = []
+    if np.isfinite(trend_strength) and trend_strength >= 0.55:
+        structure_bits.append(f"추세가 강함({trend_strength:.2f})")
+    elif np.isfinite(trend_strength):
+        structure_bits.append(f"추세가 보통/약함({trend_strength:.2f})")
+    if np.isfinite(seasonality_strength) and seasonality_strength >= 0.45:
+        structure_bits.append(f"계절성이 뚜렷함({seasonality_strength:.2f})")
+    elif np.isfinite(seasonality_strength):
+        structure_bits.append(f"계절성이 제한적임({seasonality_strength:.2f})")
+    if np.isfinite(lag1):
+        structure_bits.append(f"1시차 자기상관 {lag1:.2f}")
+    if np.isfinite(cv):
+        structure_bits.append(f"상대 변동성 {cv:.2f}")
+    structure_sentence = "; ".join(structure_bits) if structure_bits else "데이터 길이가 짧아 구조 판단이 제한적입니다."
+
+    context_sentence = (
+        f"참고 변수로 {', '.join(context_cols)} 컬럼을 사용했습니다."
+        if context_cols
+        else "참고 변수를 선택하지 않아 대상 시계열만으로 판단했습니다."
+    )
+
+    return (
+        f"**`{value_col}` 분석 브리핑**\n\n"
+        f"- 분석 기간: {start} ~ {end}, 총 {len(series):,}개 관측치입니다. 전체 방향은 **{direction}**입니다.\n"
+        f"- 시계열 구조: {structure_sentence}.\n"
+        f"- 이상탐지 결과: {anomaly_sentence}\n"
+        f"- 해석: {review_sentence}\n"
+        f"- 참고 변수: {context_sentence}\n"
+        f"- 현재 설정: {config.business_mode} 모드, 민감도 분위수 {config.sensitivity:.2f}, 이동 창 {config.window}."
+    )
+
+
+def generate_visual_insights(detected: pd.DataFrame, metrics: pd.DataFrame) -> pd.DataFrame:
+    anomalies = detected[detected["is_anomaly"]].sort_values("anomaly_score", ascending=False)
+    score_q90 = detected["anomaly_score"].quantile(0.90)
+    score_q95 = detected["anomaly_score"].quantile(0.95)
+    max_score = detected["anomaly_score"].max()
+    dominant_component = (
+        detected[["rolling_z", "iqr_score", "stl_score", "isolation_score"]]
+        .mean()
+        .sort_values(ascending=False)
+        .index[0]
+    )
+    dominant_type = "none"
+    if not anomalies.empty:
+        dominant_type = anomalies["anomaly_type"].value_counts().idxmax()
+
+    trend_strength = metric_value(metrics, "추세 강도")
+    seasonality_strength = metric_value(metrics, "계절성 강도")
+    anomaly_rate = metric_value(metrics, "이상치 비율")
+
+    if np.isfinite(seasonality_strength) and seasonality_strength >= 0.6:
+        structure_comment = "계절성이 강하므로 반복 패턴을 제거한 뒤에도 남는 이탈을 중요하게 봅니다."
+    elif np.isfinite(trend_strength) and trend_strength >= 0.6:
+        structure_comment = "추세가 뚜렷하므로 고정 평균이 아니라 이동 기준선과 비교합니다."
+    else:
+        structure_comment = "추세/계절 구조가 약해 국소 이상치 기준의 비중이 커집니다."
+
+    if anomaly_rate <= 0.03:
+        rate_comment = "이상치 비율이 낮아 선별적으로 탐지된 상태입니다."
+    elif anomaly_rate <= 0.10:
+        rate_comment = "이상치 비율이 중간 수준이므로 제거 전 개별 검토가 필요합니다."
+    else:
+        rate_comment = "이상치가 넓게 탐지되었습니다. 너무 많다면 민감도를 낮추는 것을 고려하세요."
+
+    rows = [
+        {
+            "시각화 영역": "시계열 그래프",
+            "확인할 내용": "빨간 표식은 국소 추세 또는 계절 패턴에서 벗어난 지점입니다.",
+            "현재 해석": f"{len(anomalies)}개 지점이 표시되었고, 주요 이상 유형은 {dominant_type}입니다.",
+        },
+        {
+            "시각화 영역": "이상 점수 추이",
+            "확인할 내용": "점수가 높게 솟는 구간은 여러 탐지 기준이 강하게 반응한 시점입니다.",
+            "현재 해석": f"최대 점수는 {max_score:.2f}, 90% 분위수는 {score_q90:.2f}, 95% 분위수는 {score_q95:.2f}입니다.",
+        },
+        {
+            "시각화 영역": "점수 분포",
+            "확인할 내용": "오른쪽 꼬리가 길수록 일부 관측치가 나머지보다 훨씬 특이하다는 뜻입니다.",
+            "현재 해석": rate_comment,
+        },
+        {
+            "시각화 영역": "탐지 기준별 점수",
+            "확인할 내용": "rolling_z, IQR, STL, Isolation Forest 중 어떤 기준이 신호를 만들었는지 비교합니다.",
+            "현재 해석": f"평균적으로 가장 강한 기준은 {dominant_component}입니다. {structure_comment}",
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def data_quality_summary(meta: dict[str, float | int | str], metrics: pd.DataFrame, detected: pd.DataFrame) -> pd.DataFrame:
+    missing = int(meta.get("missing_values", 0))
+    duplicates = int(meta.get("duplicates", 0))
+    points = int(metric_value(metrics, "관측치 수"))
+    anomaly_rate = metric_value(metrics, "이상치 비율")
+    adf_p = metric_value(metrics, "ADF p-value")
+
+    if missing == 0 and duplicates == 0:
+        quality_status = "양호"
+        quality_note = "집계 전 대상 값 결측치와 중복 시점이 발견되지 않았습니다."
+    elif missing <= max(1, points * 0.03) and duplicates <= max(1, points * 0.03):
+        quality_status = "사용 가능"
+        quality_note = "소량의 보간 또는 중복 집계만 필요했습니다."
+    else:
+        quality_status = "검토 필요"
+        quality_note = "전처리 영향이 비교적 커서 이상치 판단을 신중히 검토해야 합니다."
+
+    if np.isfinite(adf_p):
+        stationarity_note = "비정상 시계열 가능성" if adf_p >= 0.05 else "정상 시계열 가능성"
+    else:
+        stationarity_note = "정상성 검정 판단 제한"
+
+    return pd.DataFrame(
+        [
+            {"점검 항목": "데이터 품질", "상태": quality_status, "설명": quality_note},
+            {"점검 항목": "시간 주기", "상태": str(meta.get("frequency", "unknown")), "설명": "자동 인식 또는 사용자가 선택한 시계열 주기입니다."},
+            {"점검 항목": "정상성", "상태": stationarity_note, "설명": f"ADF p-value: {adf_p:.4f}" if np.isfinite(adf_p) else "ADF p-value를 계산할 수 없습니다."},
+            {"점검 항목": "이상치 비율", "상태": f"{anomaly_rate:.1%}", "설명": "현재 이상치로 표시된 관측치의 비율입니다."},
+        ]
+    )
 
 
 def decomposition_strength(series: pd.Series, period: int) -> tuple[float, float]:
@@ -392,7 +561,7 @@ def line_chart(detected: pd.DataFrame) -> go.Figure:
             x=detected["timestamp"],
             y=detected["value"],
             mode="lines",
-            name="series",
+            name="시계열",
             line=dict(color="#1f2937", width=2),
         )
     )
@@ -402,10 +571,10 @@ def line_chart(detected: pd.DataFrame) -> go.Figure:
             x=anomalies["timestamp"],
             y=anomalies["value"],
             mode="markers",
-            name="anomaly",
+            name="이상치",
             marker=dict(color="#e11d48", size=10, symbol="x"),
             text=anomalies["anomaly_type"],
-            hovertemplate="%{x}<br>value=%{y}<br>%{text}<extra></extra>",
+            hovertemplate="%{x}<br>값=%{y}<br>%{text}<extra></extra>",
         )
     )
     fig.update_layout(
@@ -415,8 +584,8 @@ def line_chart(detected: pd.DataFrame) -> go.Figure:
         margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    fig.update_xaxes(title="time")
-    fig.update_yaxes(title="value")
+    fig.update_xaxes(title="시간")
+    fig.update_yaxes(title="값")
     return fig
 
 
@@ -427,7 +596,7 @@ def score_chart(detected: pd.DataFrame) -> go.Figure:
             x=detected["timestamp"],
             y=detected["anomaly_score"],
             mode="lines",
-            name="ensemble score",
+            name="종합 이상 점수",
             line=dict(color="#2563eb", width=2),
         ),
         row=1,
@@ -438,16 +607,16 @@ def score_chart(detected: pd.DataFrame) -> go.Figure:
             x=detected["anomaly_score"],
             nbinsx=30,
             marker_color="#93c5fd",
-            name="score distribution",
+            name="점수 분포",
         ),
         row=2,
         col=1,
     )
     fig.update_layout(height=520, template="plotly_white", margin=dict(l=10, r=10, t=30, b=10))
-    fig.update_yaxes(title="score", row=1, col=1)
-    fig.update_yaxes(title="count", row=2, col=1)
-    fig.update_xaxes(title="time", row=1, col=1)
-    fig.update_xaxes(title="score", row=2, col=1)
+    fig.update_yaxes(title="점수", row=1, col=1)
+    fig.update_yaxes(title="개수", row=2, col=1)
+    fig.update_xaxes(title="시간", row=1, col=1)
+    fig.update_xaxes(title="점수", row=2, col=1)
     return fig
 
 
@@ -475,58 +644,26 @@ def component_chart(detected: pd.DataFrame) -> go.Figure:
         margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    fig.update_xaxes(title="time")
-    fig.update_yaxes(title="component score")
+    fig.update_xaxes(title="시간")
+    fig.update_yaxes(title="기준별 점수")
     return fig
 
 
 def anomaly_type_chart(detected: pd.DataFrame) -> go.Figure:
     anomalies = detected[detected["is_anomaly"]]
     counts = anomalies["anomaly_type"].value_counts().reset_index()
-    counts.columns = ["type", "count"]
+    counts.columns = ["유형", "개수"]
     fig = go.Figure(
         go.Bar(
-            x=counts["type"],
-            y=counts["count"],
+            x=counts["유형"],
+            y=counts["개수"],
             marker_color=["#2563eb", "#0f766e", "#ea580c", "#7c3aed", "#64748b"][: len(counts)],
         )
     )
     fig.update_layout(height=330, template="plotly_white", margin=dict(l=10, r=10, t=30, b=10))
-    fig.update_xaxes(title="anomaly type")
-    fig.update_yaxes(title="count")
+    fig.update_xaxes(title="이상치 유형")
+    fig.update_yaxes(title="개수")
     return fig
-
-
-def differentiation_scorecard() -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "baseline assignment feature": "Upload CSV and detect anomalies",
-                "added differentiation": "Classifies anomaly type and explains method agreement",
-                "why it matters": "Shows reasoning, not only red dots",
-            },
-            {
-                "baseline assignment feature": "Dashboard charts",
-                "added differentiation": "Score decomposition by rolling, IQR, STL, and Isolation Forest",
-                "why it matters": "Evaluator can judge whether detection is appropriate",
-            },
-            {
-                "baseline assignment feature": "Multivariate CSV support",
-                "added differentiation": "Optional context columns influence Isolation Forest and root-cause notes",
-                "why it matters": "Uses extra CSV variables instead of ignoring them",
-            },
-            {
-                "baseline assignment feature": "Metric table",
-                "added differentiation": "Action-oriented anomaly review table and markdown report",
-                "why it matters": "Looks like a practical monitoring tool",
-            },
-            {
-                "baseline assignment feature": "Parameter changes",
-                "added differentiation": "Business mode changes the recommended response",
-                "why it matters": "Same anomaly is interpreted differently by domain",
-            },
-        ]
-    )
 
 
 def make_report(
@@ -539,36 +676,44 @@ def make_report(
 ) -> str:
     anomalies = detected[detected["is_anomaly"]].copy()
     top = anomalies.sort_values("anomaly_score", ascending=False).head(10)
+    briefing = generate_analysis_briefing(
+        pd.Series(detected["value"].values, index=pd.to_datetime(detected["timestamp"])),
+        detected,
+        metrics,
+        value_col,
+        config,
+        context_cols,
+    ).replace("**", "")
     lines = [
-        "# Time Series Anomaly Intelligence Report",
+        "# 시계열 이상탐지 분석 리포트",
         "",
-        f"- Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"- Time column: `{time_col}`",
-        f"- Value column: `{value_col}`",
-        f"- Context columns: `{', '.join(context_cols) if context_cols else 'none'}`",
-        f"- Business mode: `{config.business_mode}`",
-        f"- Frequency: `{config.freq}`",
-        f"- Window: `{config.window}`",
-        f"- Sensitivity quantile: `{config.sensitivity:.2f}`",
+        f"- 생성 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- 시간 컬럼: `{time_col}`",
+        f"- 분석 대상 컬럼: `{value_col}`",
+        f"- 참고 변수: `{', '.join(context_cols) if context_cols else '없음'}`",
+        f"- 분석 모드: `{config.business_mode}`",
+        f"- 시간 주기: `{config.freq}`",
+        f"- 이동 창: `{config.window}`",
+        f"- 민감도 분위수: `{config.sensitivity:.2f}`",
         "",
-        "## Differentiation Point",
-        "This app does not stop at marking anomalies. It classifies each anomaly, explains which detection signals agreed, checks context columns, and suggests a review action.",
+        "## 분석 브리핑",
+        briefing,
         "",
-        "## Key Metrics",
+        "## 주요 지표",
     ]
     for _, row in metrics.iterrows():
-        value = row["value"]
+        value = row["값"]
         if isinstance(value, float):
             value = f"{value:.4f}"
-        lines.append(f"- {row['metric']}: {value} ({row['meaning']})")
-    lines.extend(["", "## Top Anomalies"])
+        lines.append(f"- {row['지표']}: {value} ({row['의미']})")
+    lines.extend(["", "## 주요 이상치"])
     if top.empty:
-        lines.append("- No anomalies detected under the current settings.")
+        lines.append("- 현재 설정에서 탐지된 이상치가 없습니다.")
     else:
         for _, row in top.iterrows():
             lines.append(
-                f"- {row['timestamp']}: value={row['value']:.4f}, score={row['anomaly_score']:.4f}, "
-                f"type={row['anomaly_type']}, reason={row['reason']}, action={row['recommended_action']}"
+                f"- {row['timestamp']}: 값={row['value']:.4f}, 점수={row['anomaly_score']:.4f}, "
+                f"유형={row['anomaly_type']}, 근거={row['reason']}, 권장 조치={row['recommended_action']}"
             )
     return "\n".join(lines)
 
@@ -610,44 +755,44 @@ def main() -> None:
 
     st.title(APP_TITLE)
     st.markdown(
-        '<p class="app-subtitle">CSV upload, automatic anomaly detection, explanation, anomaly type classification, and action-oriented review.</p>',
+        '<p class="app-subtitle">CSV 업로드부터 이상치 탐지, 유형 분류, 근거 설명, 검토 조치 제안까지 한 번에 확인합니다.</p>',
         unsafe_allow_html=True,
     )
 
     with st.sidebar:
-        st.header("Input")
-        uploaded_file = st.file_uploader("CSV file", type=["csv"])
+        st.header("입력 데이터")
+        uploaded_file = st.file_uploader("CSV 파일", type=["csv"])
         df = read_csv(uploaded_file)
 
         dt_cols = candidate_datetime_columns(df)
         num_cols = candidate_numeric_columns(df)
         if not dt_cols:
-            st.error("No date/time column was detected.")
+            st.error("날짜/시간 컬럼을 찾지 못했습니다.")
             return
         if not num_cols:
-            st.error("No numeric column was detected.")
+            st.error("수치형 컬럼을 찾지 못했습니다.")
             return
 
-        time_col = st.selectbox("Time column", dt_cols, index=0)
+        time_col = st.selectbox("시간 컬럼", dt_cols, index=0)
         value_default = 0 if num_cols[0] != time_col else min(1, len(num_cols) - 1)
-        value_col = st.selectbox("Target value column", num_cols, index=value_default)
+        value_col = st.selectbox("분석 대상 값 컬럼", num_cols, index=value_default)
         context_options = [col for col in num_cols if col not in {time_col, value_col}]
-        context_cols = st.multiselect("Context columns for root-cause hints", context_options, default=context_options[:2])
+        context_cols = st.multiselect("원인 힌트용 참고 변수", context_options, default=context_options[:2])
 
-        st.header("Detection")
-        freq = st.selectbox("Frequency", ["auto", "D", "W", "M", "H"], index=0)
-        window = st.slider("Rolling window", min_value=5, max_value=90, value=21, step=2)
+        st.header("탐지 설정")
+        freq = st.selectbox("시간 주기", ["auto", "D", "W", "M", "H"], index=0)
+        window = st.slider("이동 창 크기", min_value=5, max_value=90, value=21, step=2)
         sensitivity_label = st.select_slider(
-            "Sensitivity",
-            options=["low", "medium", "high", "very high"],
-            value="high",
+            "탐지 민감도",
+            options=["낮음", "보통", "높음", "매우 높음"],
+            value="높음",
         )
-        sensitivity_map = {"low": 0.985, "medium": 0.965, "high": 0.94, "very high": 0.90}
-        use_stl = st.toggle("Use STL residual score", value=True)
-        use_iforest = st.toggle("Use multifeature Isolation Forest", value=True)
+        sensitivity_map = {"낮음": 0.985, "보통": 0.965, "높음": 0.94, "매우 높음": 0.90}
+        use_stl = st.toggle("STL 잔차 점수 사용", value=True)
+        use_iforest = st.toggle("다변량 Isolation Forest 사용", value=True)
         business_mode = st.selectbox(
-            "Review mode",
-            ["Demand / Sales", "Operations / Sensor", "Finance / Risk", "General"],
+            "검토 모드",
+            ["수요/매출", "운영/센서", "금융/리스크", "일반"],
             index=0,
         )
 
@@ -655,11 +800,11 @@ def main() -> None:
         series, meta = prepare_series(df, time_col, value_col, freq)
         context = prepare_context_frame(df, time_col, context_cols, series.index)
     except Exception as exc:
-        st.error(f"Time series preprocessing failed: {exc}")
+        st.error(f"시계열 전처리에 실패했습니다: {exc}")
         return
 
     if len(series) < 12:
-        st.error("At least 12 usable observations are recommended.")
+        st.error("분석에는 최소 12개 이상의 유효 관측치를 권장합니다.")
         return
 
     config = DetectionConfig(
@@ -672,64 +817,75 @@ def main() -> None:
     )
     detected = detect_anomalies(series, config, context)
     metrics = describe_series(series, detected, meta)
+    briefing = generate_analysis_briefing(series, detected, metrics, value_col, config, context_cols)
+    visual_insights = generate_visual_insights(detected, metrics)
+    quality_summary = data_quality_summary(meta, metrics, detected)
     anomaly_count = int(detected["is_anomaly"].sum())
     anomaly_rate = anomaly_count / len(detected)
     latest = detected[detected["is_anomaly"]].tail(1)
     latest_text = "none" if latest.empty else str(latest.iloc[0]["timestamp"])
 
     k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Rows", f"{len(series):,}")
-    k2.metric("Anomalies", f"{anomaly_count:,}")
-    k3.metric("Anomaly rate", f"{anomaly_rate:.1%}")
-    k4.metric("Context cols", f"{len(context_cols):,}")
-    k5.metric("Latest anomaly", latest_text)
+    k1.metric("관측치", f"{len(series):,}")
+    k2.metric("이상치", f"{anomaly_count:,}")
+    k3.metric("이상치 비율", f"{anomaly_rate:.1%}")
+    k4.metric("참고 변수", f"{len(context_cols):,}")
+    k5.metric("최근 이상치", latest_text)
 
     tabs = st.tabs(
         [
-            "Dashboard",
-            "Anomaly Review",
-            "Indicators",
-            "Differentiation",
-            "Data Preview",
+            "대시보드",
+            "이상치 검토",
+            "평가지표",
+            "데이터 미리보기",
         ]
     )
     with tabs[0]:
+        st.subheader("분석 브리핑")
+        st.markdown(briefing)
+        with st.expander("시각화 해석 가이드", expanded=True):
+            stretch_dataframe(visual_insights, hide_index=True)
+        with st.expander("데이터 품질 점검", expanded=False):
+            stretch_dataframe(quality_summary, hide_index=True)
+        st.divider()
         stretch_plotly_chart(line_chart(detected))
         c1, c2 = st.columns([1, 1])
         with c1:
             stretch_plotly_chart(score_chart(detected))
+            st.caption("점수 추이와 분포는 각 탐지 지점이 전체 시계열에서 얼마나 드문지 보여줍니다.")
         with c2:
             stretch_plotly_chart(component_chart(detected))
+            st.caption("기준별 점수는 국소 이탈, IQR, 계절성 잔차, 다변량 고립 기준 중 어떤 신호가 강했는지 보여줍니다.")
 
     with tabs[1]:
         c1, c2 = st.columns([1.15, 0.85])
         anomalies = detected[detected["is_anomaly"]].sort_values("anomaly_score", ascending=False)
         with c1:
-            review_cols = [
-                "timestamp",
-                "value",
-                "anomaly_score",
-                "severity",
-                "method_votes",
-                "anomaly_type",
-                "reason",
-                "context_note",
-                "recommended_action",
-            ]
-            stretch_dataframe(anomalies[review_cols], hide_index=True)
+            review_cols = {
+                "timestamp": "시점",
+                "value": "값",
+                "anomaly_score": "이상 점수",
+                "severity": "심각도",
+                "method_votes": "동의 기준 수",
+                "anomaly_type": "이상 유형",
+                "reason": "탐지 근거",
+                "context_note": "참고 변수 해석",
+                "recommended_action": "권장 검토 조치",
+            }
+            stretch_dataframe(anomalies[list(review_cols)].rename(columns=review_cols), hide_index=True)
         with c2:
             stretch_plotly_chart(anomaly_type_chart(detected))
-            st.caption("This review board is the main differentiation point: each point is classified, explained, and connected to an action.")
+            st.caption("각 이상치는 유형, 탐지 근거, 권장 검토 조치와 함께 정리됩니다.")
 
         st.download_button(
-            "Download full anomaly CSV",
+            "이상탐지 결과 CSV 다운로드",
             data=dataframe_to_csv_bytes(detected),
             file_name=f"anomaly_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
         )
         report = make_report(detected, metrics, time_col, value_col, config, context_cols)
         st.download_button(
-            "Download explanation report",
+            "분석 리포트 다운로드",
             data=report.encode("utf-8-sig"),
             file_name=f"anomaly_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
             mime="text/markdown",
@@ -738,23 +894,11 @@ def main() -> None:
     with tabs[2]:
         stretch_dataframe(metrics, hide_index=True)
         st.caption(
-            "The ensemble score combines rolling z-score, IQR distance, STL residual score, and multifeature Isolation Forest score."
+            "종합 이상 점수는 rolling z-score, IQR 거리, STL 잔차 점수, 다변량 Isolation Forest 점수를 결합해 계산합니다."
         )
 
     with tabs[3]:
-        st.subheader("How this avoids the Project 1 differentiation problem")
-        stretch_dataframe(differentiation_scorecard(), hide_index=True)
-        st.markdown(
-            """
-            **Presentation angle:** Do not introduce this as only an anomaly detector.
-            Present it as an anomaly intelligence dashboard that explains
-            what type of anomaly happened, which methods agreed, whether context columns support it,
-            and what the analyst should check next.
-            """
-        )
-
-    with tabs[4]:
-        st.write("Changing the uploaded file, target column, context columns, or parameters triggers a fresh analysis.")
+        st.write("업로드 파일, 분석 대상 컬럼, 참고 변수, 탐지 설정을 바꾸면 분석 결과가 자동으로 다시 계산됩니다.")
         stretch_dataframe(df.head(200))
 
 

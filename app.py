@@ -13,10 +13,22 @@ from plotly.subplots import make_subplots
 from sklearn.ensemble import IsolationForest
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 from statsmodels.tsa.seasonal import STL
-from statsmodels.tsa.stattools import acf, adfuller
+from statsmodels.tsa.stattools import acf, adfuller, pacf
 
 
 APP_TITLE = "시계열 이상탐지 분석 대시보드"
+THEME = {
+    "ink": "#242331",
+    "muted": "#6f7f7b",
+    "paper": "#fbfbf8",
+    "panel": "#ffffff",
+    "mint": "#dfeeea",
+    "mint_strong": "#b7dfa8",
+    "coral": "#e78c73",
+    "coral_dark": "#c96953",
+    "line": "#2c2b3b",
+    "grid": "#d8e3df",
+}
 
 
 @dataclass
@@ -554,6 +566,21 @@ def decomposition_strength(series: pd.Series, period: int) -> tuple[float, float
         return np.nan, np.nan
 
 
+def apply_plot_theme(fig: go.Figure, height: int) -> go.Figure:
+    fig.update_layout(
+        height=height,
+        template="plotly_white",
+        paper_bgcolor=THEME["panel"],
+        plot_bgcolor=THEME["panel"],
+        font=dict(color=THEME["ink"], family="Noto Sans KR, Segoe UI, sans-serif"),
+        margin=dict(l=10, r=10, t=38, b=16),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    fig.update_xaxes(showgrid=True, gridcolor=THEME["grid"], zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor=THEME["grid"], zeroline=False)
+    return fig
+
+
 def line_chart(detected: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(
@@ -562,7 +589,7 @@ def line_chart(detected: pd.DataFrame) -> go.Figure:
             y=detected["value"],
             mode="lines",
             name="시계열",
-            line=dict(color="#1f2937", width=2),
+            line=dict(color=THEME["line"], width=2.4),
         )
     )
     anomalies = detected[detected["is_anomaly"]]
@@ -572,18 +599,13 @@ def line_chart(detected: pd.DataFrame) -> go.Figure:
             y=anomalies["value"],
             mode="markers",
             name="이상치",
-            marker=dict(color="#e11d48", size=10, symbol="x"),
+            marker=dict(color=THEME["coral_dark"], size=11, symbol="x", line=dict(width=2)),
             text=anomalies["anomaly_type"],
             hovertemplate="%{x}<br>값=%{y}<br>%{text}<extra></extra>",
         )
     )
-    fig.update_layout(
-        height=460,
-        template="plotly_white",
-        hovermode="x unified",
-        margin=dict(l=10, r=10, t=30, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    )
+    apply_plot_theme(fig, 460)
+    fig.update_layout(hovermode="x unified", title="시계열 흐름과 이상치")
     fig.update_xaxes(title="시간")
     fig.update_yaxes(title="값")
     return fig
@@ -597,7 +619,7 @@ def score_chart(detected: pd.DataFrame) -> go.Figure:
             y=detected["anomaly_score"],
             mode="lines",
             name="종합 이상 점수",
-            line=dict(color="#2563eb", width=2),
+            line=dict(color=THEME["line"], width=2.2),
         ),
         row=1,
         col=1,
@@ -606,13 +628,14 @@ def score_chart(detected: pd.DataFrame) -> go.Figure:
         go.Histogram(
             x=detected["anomaly_score"],
             nbinsx=30,
-            marker_color="#93c5fd",
+            marker_color=THEME["mint_strong"],
             name="점수 분포",
         ),
         row=2,
         col=1,
     )
-    fig.update_layout(height=520, template="plotly_white", margin=dict(l=10, r=10, t=30, b=10))
+    apply_plot_theme(fig, 520)
+    fig.update_layout(title="종합 이상 점수와 분포")
     fig.update_yaxes(title="점수", row=1, col=1)
     fig.update_yaxes(title="개수", row=2, col=1)
     fig.update_xaxes(title="시간", row=1, col=1)
@@ -623,10 +646,10 @@ def score_chart(detected: pd.DataFrame) -> go.Figure:
 def component_chart(detected: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     for col, color in [
-        ("rolling_z", "#0f766e"),
-        ("iqr_score", "#7c3aed"),
-        ("stl_score", "#ea580c"),
-        ("isolation_score", "#64748b"),
+        ("rolling_z", "#3f7f77"),
+        ("iqr_score", "#7b4cc2"),
+        ("stl_score", THEME["coral_dark"]),
+        ("isolation_score", "#6f7689"),
     ]:
         fig.add_trace(
             go.Scatter(
@@ -637,13 +660,8 @@ def component_chart(detected: pd.DataFrame) -> go.Figure:
                 line=dict(color=color, width=1.8),
             )
         )
-    fig.update_layout(
-        height=430,
-        template="plotly_white",
-        hovermode="x unified",
-        margin=dict(l=10, r=10, t=30, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    )
+    apply_plot_theme(fig, 430)
+    fig.update_layout(hovermode="x unified", title="탐지 기준별 점수")
     fig.update_xaxes(title="시간")
     fig.update_yaxes(title="기준별 점수")
     return fig
@@ -657,12 +675,89 @@ def anomaly_type_chart(detected: pd.DataFrame) -> go.Figure:
         go.Bar(
             x=counts["유형"],
             y=counts["개수"],
-            marker_color=["#2563eb", "#0f766e", "#ea580c", "#7c3aed", "#64748b"][: len(counts)],
+            marker_color=[THEME["coral"], THEME["mint_strong"], "#f2c078", "#8ab6a8", "#6f7689"][: len(counts)],
         )
     )
-    fig.update_layout(height=330, template="plotly_white", margin=dict(l=10, r=10, t=30, b=10))
+    apply_plot_theme(fig, 330)
+    fig.update_layout(title="이상치 유형 분포")
     fig.update_xaxes(title="이상치 유형")
     fig.update_yaxes(title="개수")
+    return fig
+
+
+def stationarity_diagnostics(series: pd.Series) -> pd.DataFrame:
+    values = series.dropna()
+    diff_values = values.diff().dropna()
+
+    def adf_summary(label: str, sample: pd.Series) -> dict[str, str | float]:
+        if len(sample) < 12 or sample.nunique() <= 1:
+            return {"구분": label, "ADF p-value": np.nan, "판정": "계산 제한", "해석": "관측치가 부족하거나 값 변화가 거의 없습니다."}
+        try:
+            p_value = float(adfuller(sample, autolag="AIC")[1])
+        except Exception:
+            p_value = np.nan
+        if np.isfinite(p_value) and p_value < 0.05:
+            verdict = "정상성 가능"
+            note = "평균과 분산 구조가 비교적 안정적이라고 볼 수 있습니다."
+        elif np.isfinite(p_value):
+            verdict = "비정상 가능"
+            note = "추세나 계절성을 제거하거나 차분 후 분석하는 것이 유리할 수 있습니다."
+        else:
+            verdict = "계산 제한"
+            note = "ADF 검정을 계산할 수 없습니다."
+        return {"구분": label, "ADF p-value": p_value, "판정": verdict, "해석": note}
+
+    return pd.DataFrame([adf_summary("원시 시계열", values), adf_summary("1차 차분", diff_values)])
+
+
+def acf_pacf_chart(series: pd.Series) -> go.Figure:
+    values = series.dropna()
+    max_lag = max(1, min(30, len(values) // 3))
+    acf_values = acf(values, nlags=max_lag, fft=False)
+    try:
+        pacf_values = pacf(values, nlags=max_lag, method="ywm")
+    except Exception:
+        pacf_values = np.full(max_lag + 1, np.nan)
+    lags = list(range(max_lag + 1))
+
+    fig = make_subplots(rows=1, cols=2, subplot_titles=("ACF 자기상관", "PACF 부분자기상관"))
+    fig.add_trace(go.Bar(x=lags, y=acf_values, marker_color=THEME["mint_strong"], name="ACF"), row=1, col=1)
+    fig.add_trace(go.Bar(x=lags, y=pacf_values, marker_color=THEME["coral"], name="PACF"), row=1, col=2)
+    conf = 1.96 / np.sqrt(max(len(values), 1))
+    for col in [1, 2]:
+        fig.add_hline(y=conf, line_dash="dot", line_color=THEME["muted"], row=1, col=col)
+        fig.add_hline(y=-conf, line_dash="dot", line_color=THEME["muted"], row=1, col=col)
+    apply_plot_theme(fig, 390)
+    fig.update_layout(title="ACF/PACF 진단")
+    fig.update_xaxes(title="시차")
+    fig.update_yaxes(title="상관")
+    return fig
+
+
+def stl_decomposition_chart(series: pd.Series, freq: str) -> go.Figure:
+    period = guess_period(freq, len(series))
+    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.04)
+    values = series.dropna()
+    if len(values) >= max(24, period * 2):
+        try:
+            fit = STL(values, period=period, robust=True).fit()
+            panels = [
+                ("원시값", values, THEME["line"]),
+                ("추세", fit.trend, "#3f7f77"),
+                ("계절", fit.seasonal, THEME["coral_dark"]),
+                ("잔차", fit.resid, "#6f7689"),
+            ]
+        except Exception:
+            panels = [("원시값", values, THEME["line"])]
+    else:
+        panels = [("원시값", values, THEME["line"])]
+
+    for idx, (name, sample, color) in enumerate(panels, start=1):
+        fig.add_trace(go.Scatter(x=sample.index, y=sample.values, mode="lines", name=name, line=dict(color=color, width=1.8)), row=idx, col=1)
+    apply_plot_theme(fig, 620)
+    fig.update_layout(title=f"STL 분해 진단 (period={period})")
+    fig.update_xaxes(title="시간", row=len(panels), col=1)
+    fig.update_yaxes(title="값")
     return fig
 
 
@@ -726,10 +821,320 @@ def inject_style() -> None:
     st.markdown(
         """
         <style>
-        .block-container { padding-top: 1.5rem; }
-        [data-testid="stMetricValue"] { font-size: 1.55rem; }
-        .app-subtitle { color: #475569; margin-top: -0.6rem; }
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700;800&display=swap');
+
+        :root {
+            --ink: #242331;
+            --muted: #6f7f7b;
+            --paper: #fbfbf8;
+            --panel: #ffffff;
+            --mint: #dfeeea;
+            --mint-strong: #b7dfa8;
+            --coral: #e78c73;
+            --coral-dark: #c96953;
+            --line: #2c2b3b;
+            --grid: #d8e3df;
+        }
+
+        html, body, [class*="css"] {
+            font-family: 'Noto Sans KR', 'Segoe UI', sans-serif;
+        }
+
+        .stApp {
+            background:
+                linear-gradient(175deg, rgba(183, 205, 199, .55) 0 18%, transparent 18%),
+                linear-gradient(5deg, transparent 0 83%, rgba(183, 205, 199, .48) 83%),
+                var(--mint);
+            color: var(--ink);
+        }
+
+        .block-container {
+            max-width: 1320px;
+            padding-top: 1.3rem;
+            padding-bottom: 2.4rem;
+        }
+
+        [data-testid="stSidebar"] {
+            background: var(--ink);
+            border-right: 0;
+        }
+
+        [data-testid="stSidebar"] * {
+            color: #f8faf8 !important;
+        }
+
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] .stMarkdown p {
+            font-weight: 700;
+        }
+
+        [data-testid="stSidebar"] section {
+            background: transparent;
+        }
+
+        [data-testid="stSidebar"] [data-baseweb="select"] > div,
+        [data-testid="stSidebar"] textarea,
+        [data-testid="stSidebar"] input {
+            background: #343342 !important;
+            border-color: rgba(255,255,255,.14) !important;
+        }
+
+        .dashboard-shell {
+            background: rgba(251, 251, 248, .96);
+            border: 1px solid rgba(36,35,49,.08);
+            box-shadow: 0 28px 70px rgba(36,35,49,.16);
+            padding: 28px 30px 34px;
+            margin: 8px 0 22px;
+        }
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 18px;
+            padding: 8px 0 22px;
+            border-bottom: 1px solid rgba(36,35,49,.08);
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 270px;
+        }
+
+        .brand-mark {
+            width: 44px;
+            height: 44px;
+            display: grid;
+            place-items: center;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--ink) 0 52%, var(--coral) 52%);
+            color: #fff;
+            font-weight: 900;
+            letter-spacing: 0;
+        }
+
+        .brand-title {
+            font-size: 1.05rem;
+            font-weight: 900;
+            letter-spacing: .04em;
+        }
+
+        .brand-subtitle {
+            color: var(--muted);
+            font-size: .86rem;
+            margin-top: 1px;
+        }
+
+        .top-pill {
+            flex: 1;
+            max-width: 420px;
+            background: #edf5f3;
+            border-radius: 999px;
+            padding: 8px 16px;
+            color: var(--muted);
+            font-size: .9rem;
+            text-align: center;
+        }
+
+        .student-badge {
+            background: var(--coral);
+            color: var(--ink);
+            border-radius: 999px;
+            padding: 9px 14px;
+            font-weight: 900;
+            white-space: nowrap;
+        }
+
+        .page-heading {
+            display: flex;
+            align-items: end;
+            justify-content: space-between;
+            gap: 20px;
+            margin: 22px 0 18px;
+        }
+
+        .page-heading h1 {
+            margin: 0;
+            color: var(--ink);
+            font-size: clamp(2rem, 4vw, 3.4rem);
+            letter-spacing: 0;
+            line-height: 1;
+            font-weight: 900;
+        }
+
+        .page-heading p {
+            margin: 8px 0 0;
+            color: var(--muted);
+            font-weight: 600;
+        }
+
+        .kpi-card {
+            background: var(--panel);
+            border: 1px solid rgba(36,35,49,.08);
+            border-radius: 8px;
+            min-height: 138px;
+            box-shadow: 0 10px 24px rgba(36,35,49,.07);
+            overflow: hidden;
+        }
+
+        .kpi-head {
+            background: var(--ink);
+            color: #fff;
+            padding: 11px 16px;
+            font-weight: 900;
+            letter-spacing: .02em;
+            font-size: .92rem;
+        }
+
+        .kpi-body {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 16px 16px 14px;
+        }
+
+        .kpi-value {
+            color: var(--ink);
+            font-weight: 900;
+            font-size: clamp(1.55rem, 2.5vw, 2.25rem);
+            line-height: 1;
+        }
+
+        .kpi-caption {
+            color: var(--muted);
+            font-weight: 800;
+            font-size: .78rem;
+            margin: 0 16px 14px;
+        }
+
+        .kpi-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            display: grid;
+            place-items: center;
+            background: var(--coral);
+            color: var(--ink);
+            font-size: 1.45rem;
+            font-weight: 900;
+            flex: 0 0 auto;
+        }
+
+        .kpi-icon.mint { background: var(--mint-strong); }
+        .kpi-icon.dark { background: var(--ink); color: #fff; }
+
+        div[data-testid="stTabs"] button {
+            color: var(--ink);
+            font-weight: 900;
+        }
+
+        div[data-testid="stTabs"] button[aria-selected="true"] {
+            color: var(--coral-dark);
+        }
+
+        div[data-testid="stTabs"] [data-baseweb="tab-highlight"] {
+            background-color: var(--coral);
+        }
+
+        div[data-testid="stDataFrame"],
+        div[data-testid="stTable"],
+        [data-testid="stExpander"],
+        .stDownloadButton button {
+            border-radius: 8px !important;
+        }
+
+        [data-testid="stExpander"] {
+            background: rgba(255,255,255,.5) !important;
+            border: 1px solid rgba(36,35,49,.07) !important;
+            box-shadow: 0 8px 22px rgba(36,35,49,.04);
+            overflow: hidden;
+        }
+
+        [data-testid="stExpander"] summary {
+            background: #eef7f4 !important;
+            color: var(--ink) !important;
+            border-radius: 8px 8px 0 0 !important;
+            font-weight: 900 !important;
+        }
+
+        [data-testid="stExpander"] summary *,
+        [data-testid="stExpander"] summary svg {
+            color: var(--ink) !important;
+            fill: var(--ink) !important;
+            stroke: var(--ink) !important;
+        }
+
+        .stDownloadButton button {
+            background: var(--coral) !important;
+            color: var(--ink) !important;
+            border: 0 !important;
+            font-weight: 900 !important;
+            box-shadow: 0 8px 18px rgba(201,105,83,.18);
+        }
+
+        .stDownloadButton button:hover {
+            background: var(--coral-dark) !important;
+            color: #fff !important;
+            border: 0 !important;
+        }
+
+        .stCaption, .stMarkdown p, .stWrite {
+            color: var(--ink);
+        }
+
+        @media (max-width: 820px) {
+            .dashboard-shell { padding: 18px 14px; }
+            .topbar, .page-heading { align-items: flex-start; flex-direction: column; }
+            .top-pill { max-width: none; width: 100%; }
+        }
         </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_top_header(value_col: str, context_cols: list[str]) -> None:
+    context_text = f"{len(context_cols)}개 참고 변수 사용" if context_cols else "대상 시계열 단독 분석"
+    st.markdown(
+        f"""
+        <div class="dashboard-shell">
+            <div class="topbar">
+                <div class="brand">
+                    <div class="brand-mark">TS</div>
+                    <div>
+                        <div class="brand-title">ANOMALY INTELLIGENCE</div>
+                        <div class="brand-subtitle">시계열분석 프로젝트 2</div>
+                    </div>
+                </div>
+                <div class="top-pill">대상 컬럼: {value_col} · {context_text}</div>
+                <div class="student-badge">C321083 김태환</div>
+            </div>
+            <div class="page-heading">
+                <div>
+                    <h1>이상탐지 대시보드</h1>
+                    <p>CSV 업로드, 자동 탐지, 강의 기반 진단, 설명형 검토 리포트를 한 화면에서 확인합니다.</p>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_kpi_card(title: str, value: str, caption: str, icon: str, tone: str = "dark") -> None:
+    st.markdown(
+        f"""
+        <div class="kpi-card">
+            <div class="kpi-head">{title}</div>
+            <div class="kpi-body">
+                <div class="kpi-value">{value}</div>
+                <div class="kpi-icon {tone}">{icon}</div>
+            </div>
+            <div class="kpi-caption">{caption}</div>
+        </div>
         """,
         unsafe_allow_html=True,
     )
@@ -752,12 +1157,6 @@ def stretch_dataframe(data: pd.DataFrame, hide_index: bool = False) -> None:
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     inject_style()
-
-    st.title(APP_TITLE)
-    st.markdown(
-        '<p class="app-subtitle">CSV 업로드부터 이상치 탐지, 유형 분류, 근거 설명, 검토 조치 제안까지 한 번에 확인합니다.</p>',
-        unsafe_allow_html=True,
-    )
 
     with st.sidebar:
         st.header("입력 데이터")
@@ -825,18 +1224,26 @@ def main() -> None:
     latest = detected[detected["is_anomaly"]].tail(1)
     latest_text = "none" if latest.empty else str(latest.iloc[0]["timestamp"])
 
+    render_top_header(value_col, context_cols)
+
     k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("관측치", f"{len(series):,}")
-    k2.metric("이상치", f"{anomaly_count:,}")
-    k3.metric("이상치 비율", f"{anomaly_rate:.1%}")
-    k4.metric("참고 변수", f"{len(context_cols):,}")
-    k5.metric("최근 이상치", latest_text)
+    with k1:
+        render_kpi_card("관측치", f"{len(series):,}", "분석에 사용된 시점", "∑", "dark")
+    with k2:
+        render_kpi_card("이상치", f"{anomaly_count:,}", "탐지된 검토 후보", "!", "coral")
+    with k3:
+        render_kpi_card("이상치 비율", f"{anomaly_rate:.1%}", "전체 대비 이상치", "%", "mint")
+    with k4:
+        render_kpi_card("참고 변수", f"{len(context_cols):,}", "다변량 분석 입력", "+", "dark")
+    with k5:
+        render_kpi_card("최근 이상치", latest_text[:16], "가장 마지막 탐지 시점", "⌁", "coral")
 
     tabs = st.tabs(
         [
             "대시보드",
             "이상치 검토",
             "평가지표",
+            "시계열 진단",
             "데이터 미리보기",
         ]
     )
@@ -898,6 +1305,20 @@ def main() -> None:
         )
 
     with tabs[3]:
+        st.subheader("강의 기반 시계열 진단")
+        st.write("정상성, 차분, 자기상관, 부분자기상관, STL 분해를 함께 확인해 이상탐지 결과의 배경 구조를 판단합니다.")
+        d1, d2 = st.columns([0.9, 1.1])
+        with d1:
+            st.markdown("#### 정상성 및 차분 비교")
+            stretch_dataframe(stationarity_diagnostics(series), hide_index=True)
+            st.caption("ADF p-value가 0.05보다 작으면 정상 시계열 가능성이 높다고 해석합니다.")
+        with d2:
+            stretch_plotly_chart(acf_pacf_chart(series))
+            st.caption("ACF/PACF는 시차별 의존성을 보여주며, AR/MA 구조 또는 계절 패턴 판단에 활용됩니다.")
+        stretch_plotly_chart(stl_decomposition_chart(series, config.freq))
+        st.caption("STL 분해는 원시 시계열을 추세, 계절, 잔차로 나누어 계절성으로 설명되지 않는 이탈을 확인합니다.")
+
+    with tabs[4]:
         st.write("업로드 파일, 분석 대상 컬럼, 참고 변수, 탐지 설정을 바꾸면 분석 결과가 자동으로 다시 계산됩니다.")
         stretch_dataframe(df.head(200))
 

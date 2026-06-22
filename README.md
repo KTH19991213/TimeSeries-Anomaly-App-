@@ -2,7 +2,7 @@
 
 시계열분석 프로젝트 2 제출용 Streamlit 웹앱입니다.
 
-
+https://kth19991213-timeseries-anomaly-app--app-qknahv.streamlit.app/
 
 ## 목표
 

@@ -592,6 +592,11 @@ def apply_plot_theme(fig: go.Figure, height: int) -> go.Figure:
             x=1,
             font=dict(color=THEME["ink"], size=12),
         ),
+        hoverlabel=dict(
+            bgcolor="#fbfbf8",
+            bordercolor=THEME["coral"],
+            font=dict(color=THEME["ink"], family="Noto Sans KR, Segoe UI, sans-serif", size=13),
+        ),
     )
     fig.update_xaxes(**axis_style)
     fig.update_yaxes(**axis_style)
@@ -603,6 +608,11 @@ def enforce_plot_text_color(fig: go.Figure) -> go.Figure:
         font=dict(color=THEME["ink"], family="Noto Sans KR, Segoe UI, sans-serif", size=13),
         title_font=dict(color=THEME["ink"], size=18),
         legend_font=dict(color=THEME["ink"], size=12),
+        hoverlabel=dict(
+            bgcolor="#fbfbf8",
+            bordercolor=THEME["coral"],
+            font=dict(color=THEME["ink"], family="Noto Sans KR, Segoe UI, sans-serif", size=13),
+        ),
     )
     fig.update_xaxes(
         color=THEME["ink"],
@@ -1130,6 +1140,15 @@ def inject_style() -> None:
         [data-testid="stPlotlyChart"] .gtitle,
         [data-testid="stPlotlyChart"] .xtitle,
         [data-testid="stPlotlyChart"] .ytitle {
+            fill: var(--ink) !important;
+        }
+
+        [data-testid="stPlotlyChart"] .hoverlayer .hovertext path {
+            fill: var(--paper) !important;
+            stroke: var(--coral) !important;
+        }
+
+        [data-testid="stPlotlyChart"] .hoverlayer .hovertext text {
             fill: var(--ink) !important;
         }
 

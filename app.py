@@ -567,17 +567,53 @@ def decomposition_strength(series: pd.Series, period: int) -> tuple[float, float
 
 
 def apply_plot_theme(fig: go.Figure, height: int) -> go.Figure:
+    axis_style = dict(
+        showgrid=True,
+        gridcolor=THEME["grid"],
+        zeroline=False,
+        color=THEME["ink"],
+        tickfont=dict(color=THEME["ink"], size=12),
+        title_font=dict(color=THEME["ink"], size=14),
+        linecolor=THEME["grid"],
+    )
     fig.update_layout(
         height=height,
         template="plotly_white",
         paper_bgcolor=THEME["panel"],
         plot_bgcolor=THEME["panel"],
-        font=dict(color=THEME["ink"], family="Noto Sans KR, Segoe UI, sans-serif"),
+        font=dict(color=THEME["ink"], family="Noto Sans KR, Segoe UI, sans-serif", size=13),
+        title_font=dict(color=THEME["ink"], size=18),
         margin=dict(l=10, r=10, t=38, b=16),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            font=dict(color=THEME["ink"], size=12),
+        ),
     )
-    fig.update_xaxes(showgrid=True, gridcolor=THEME["grid"], zeroline=False)
-    fig.update_yaxes(showgrid=True, gridcolor=THEME["grid"], zeroline=False)
+    fig.update_xaxes(**axis_style)
+    fig.update_yaxes(**axis_style)
+    return fig
+
+
+def enforce_plot_text_color(fig: go.Figure) -> go.Figure:
+    fig.update_layout(
+        font=dict(color=THEME["ink"], family="Noto Sans KR, Segoe UI, sans-serif", size=13),
+        title_font=dict(color=THEME["ink"], size=18),
+        legend_font=dict(color=THEME["ink"], size=12),
+    )
+    fig.update_xaxes(
+        color=THEME["ink"],
+        tickfont=dict(color=THEME["ink"], size=12),
+        title_font=dict(color=THEME["ink"], size=14),
+    )
+    fig.update_yaxes(
+        color=THEME["ink"],
+        tickfont=dict(color=THEME["ink"], size=12),
+        title_font=dict(color=THEME["ink"], size=14),
+    )
     return fig
 
 
@@ -608,7 +644,7 @@ def line_chart(detected: pd.DataFrame) -> go.Figure:
     fig.update_layout(hovermode="x unified", title="시계열 흐름과 이상치")
     fig.update_xaxes(title="시간")
     fig.update_yaxes(title="값")
-    return fig
+    return enforce_plot_text_color(fig)
 
 
 def score_chart(detected: pd.DataFrame) -> go.Figure:
@@ -640,7 +676,7 @@ def score_chart(detected: pd.DataFrame) -> go.Figure:
     fig.update_yaxes(title="개수", row=2, col=1)
     fig.update_xaxes(title="시간", row=1, col=1)
     fig.update_xaxes(title="점수", row=2, col=1)
-    return fig
+    return enforce_plot_text_color(fig)
 
 
 def component_chart(detected: pd.DataFrame) -> go.Figure:
@@ -664,7 +700,7 @@ def component_chart(detected: pd.DataFrame) -> go.Figure:
     fig.update_layout(hovermode="x unified", title="탐지 기준별 점수")
     fig.update_xaxes(title="시간")
     fig.update_yaxes(title="기준별 점수")
-    return fig
+    return enforce_plot_text_color(fig)
 
 
 def anomaly_type_chart(detected: pd.DataFrame) -> go.Figure:
@@ -682,7 +718,7 @@ def anomaly_type_chart(detected: pd.DataFrame) -> go.Figure:
     fig.update_layout(title="이상치 유형 분포")
     fig.update_xaxes(title="이상치 유형")
     fig.update_yaxes(title="개수")
-    return fig
+    return enforce_plot_text_color(fig)
 
 
 def stationarity_diagnostics(series: pd.Series) -> pd.DataFrame:
@@ -731,7 +767,7 @@ def acf_pacf_chart(series: pd.Series) -> go.Figure:
     fig.update_layout(title="ACF/PACF 진단")
     fig.update_xaxes(title="시차")
     fig.update_yaxes(title="상관")
-    return fig
+    return enforce_plot_text_color(fig)
 
 
 def stl_decomposition_chart(series: pd.Series, freq: str) -> go.Figure:
@@ -758,7 +794,7 @@ def stl_decomposition_chart(series: pd.Series, freq: str) -> go.Figure:
     fig.update_layout(title=f"STL 분해 진단 (period={period})")
     fig.update_xaxes(title="시간", row=len(panels), col=1)
     fig.update_yaxes(title="값")
-    return fig
+    return enforce_plot_text_color(fig)
 
 
 def make_report(
@@ -1083,6 +1119,18 @@ def inject_style() -> None:
 
         .stCaption, .stMarkdown p, .stWrite {
             color: var(--ink);
+        }
+
+        [data-testid="stPlotlyChart"] svg text {
+            fill: var(--ink) !important;
+            color: var(--ink) !important;
+        }
+
+        [data-testid="stPlotlyChart"] .legend text,
+        [data-testid="stPlotlyChart"] .gtitle,
+        [data-testid="stPlotlyChart"] .xtitle,
+        [data-testid="stPlotlyChart"] .ytitle {
+            fill: var(--ink) !important;
         }
 
         @media (max-width: 820px) {

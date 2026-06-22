@@ -17,8 +17,6 @@ The video item is excluded because the user said they will record it directly.
 
 The folder already contained earlier conversation records and project notes:
 
-- `chatgpt_share_69bfb280_extracted.md`
-- `졸업프로젝트_대화흐름_분석기록.md`
 - existing Streamlit forecasting app files such as `time_series_app.py` and `src/*`
 
 Those records mainly describe a previous recommendation-system project direction. For Project 2, the implementation was redirected to the current time series analysis assignment: CSV upload, automated anomaly detection, dashboard indicators, and deployable Streamlit app packaging.
@@ -76,8 +74,7 @@ The video item is excluded because the user said they will record it directly.
 
 The folder already contained earlier conversation records and project notes:
 
-- `chatgpt_share_69bfb280_extracted.md`
-- `졸업프로젝트_대화흐름_분석기록.md`
+
 - existing Streamlit forecasting app files such as `time_series_app.py` and `src/*`
 
 Those records mainly describe a previous recommendation-system project direction. For Project 2, the implementation was redirected to the current time series analysis assignment: CSV upload, automated anomaly detection, dashboard indicators, and deployable Streamlit app packaging.

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import json
+from html import escape
+from io import BytesIO
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -14,6 +17,10 @@ from sklearn.ensemble import IsolationForest
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 from statsmodels.tsa.seasonal import STL
 from statsmodels.tsa.stattools import acf, adfuller, pacf
+from intelligence import (DOMAIN_TERMS, DOMAIN_MODES, infer_profile, build_findings,
+                          question_catalog, profile_report)
+from benchmark import run_benchmark
+from workflow import level_shift_signal, make_manifest, restore_reviews
 
 
 APP_TITLE = "시계열 이상탐지 분석 대시보드"
@@ -39,6 +46,8 @@ class DetectionConfig:
     use_stl: bool
     use_isolation_forest: bool
     business_mode: str
+    period: int | None = None
+    use_level_shift: bool = True
 
 
 def build_sample_data() -> pd.DataFrame:
@@ -65,7 +74,16 @@ def build_sample_data() -> pd.DataFrame:
 def read_csv(uploaded_file) -> pd.DataFrame:
     if uploaded_file is None:
         return build_sample_data()
-    return pd.read_csv(uploaded_file)
+    raw = uploaded_file.getvalue()
+    for encoding in ("utf-8-sig", "cp949", "utf-16"):
+        try:
+            frame = pd.read_csv(BytesIO(raw), encoding=encoding, sep=None, engine="python")
+            if frame.empty or len(frame.columns) < 2:
+                raise ValueError("날짜와 수치 컬럼을 포함한 2개 이상의 컬럼과 데이터 행이 필요합니다.")
+            return frame
+        except UnicodeError:
+            continue
+    raise ValueError("CSV 인코딩을 읽지 못했습니다. UTF-8 또는 CP949로 저장해 주세요.")
 
 
 def candidate_datetime_columns(df: pd.DataFrame) -> list[str]:
@@ -103,26 +121,42 @@ def prepare_series(
     time_col: str,
     value_col: str,
     freq: str,
+    aggregation: str = "mean",
 ) -> tuple[pd.Series, dict[str, float | int | str]]:
     work = df[[time_col, value_col]].copy()
     work[time_col] = pd.to_datetime(work[time_col], errors="coerce")
-    work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
+    work[value_col] = pd.to_numeric(work[value_col], errors="coerce").replace([np.inf, -np.inf], np.nan)
 
     original_rows = len(work)
-    work = work.dropna(subset=[time_col]).sort_values(time_col)
+    work = work.dropna(subset=[time_col]).sort_values(time_col, kind="stable")
     missing_values = int(work[value_col].isna().sum())
-    work[value_col] = work[value_col].interpolate(limit_direction="both")
-    work = work.dropna(subset=[value_col])
 
-    series = work.groupby(time_col)[value_col].mean().sort_index()
-    inferred_freq = pd.infer_freq(series.index)
+    if aggregation not in {"mean", "sum", "last"}:
+        raise ValueError("지원하지 않는 집계 방식입니다.")
+    groups = work.groupby(time_col)[value_col]
+    series = (groups.sum(min_count=1) if aggregation == "sum" else groups.agg(aggregation)).sort_index()
+    if series.empty or not series.notna().any():
+        raise ValueError("유효한 날짜와 수치가 없습니다.")
+    inferred_freq = pd.infer_freq(series.index) if len(series) >= 3 else None
     selected_freq = inferred_freq if freq == "auto" and inferred_freq else None
     if freq != "auto":
         selected_freq = freq
 
+    inserted_missing = 0
     if selected_freq:
-        series = series.asfreq(selected_freq)
-        series = series.interpolate(limit_direction="both")
+        selected_freq = {"M": "ME", "H": "h"}.get(selected_freq, selected_freq)
+        # Reject accidental minute-to-hour multi-year expansions before allocating.
+        offset = pd.tseries.frequencies.to_offset(selected_freq)
+        try:
+            expected = (series.index[-1] - series.index[0]).value / offset.nanos + 1
+        except ValueError:
+            expected = len(series)
+        if expected > 200_000:
+            raise ValueError("선택한 주기는 20만 개 이상의 시점을 만듭니다. 더 큰 주기를 선택하세요.")
+        grouped = series.resample(selected_freq)
+        series = grouped.sum(min_count=1) if aggregation == "sum" else grouped.agg(aggregation)
+        inserted_missing = int(series.isna().sum())
+    series = series.interpolate(method="time", limit_direction="both")
 
     meta = {
         "original_rows": original_rows,
@@ -130,6 +164,9 @@ def prepare_series(
         "missing_values": missing_values,
         "duplicates": int(work[time_col].duplicated().sum()),
         "frequency": selected_freq or "irregular",
+        "aggregation": aggregation,
+        "inserted_missing": inserted_missing,
+        "invalid_dates": original_rows - int(df[time_col].pipe(pd.to_datetime, errors="coerce").notna().sum()),
     }
     return series.astype(float), meta
 
@@ -139,6 +176,7 @@ def prepare_context_frame(
     time_col: str,
     context_cols: list[str],
     target_index: pd.DatetimeIndex,
+    freq: str = "auto",
 ) -> pd.DataFrame:
     if not context_cols:
         return pd.DataFrame(index=target_index)
@@ -148,14 +186,19 @@ def prepare_context_frame(
     for col in context_cols:
         work[col] = pd.to_numeric(work[col], errors="coerce")
     context = work.groupby(time_col)[context_cols].mean().sort_index()
-    context = context.reindex(target_index).interpolate(limit_direction="both")
+    if freq not in {"auto", "irregular"}:
+        context = context.resample({"M": "ME", "H": "h"}.get(freq, freq)).mean()
+    context = context.reindex(target_index).interpolate(method="time", limit_direction="both")
     return context
 
 
 def robust_z_score(values: pd.Series) -> pd.Series:
     median = values.median()
     mad = np.median(np.abs(values - median))
-    scale = 1.4826 * mad if mad > 0 else values.std(ddof=0)
+    # STL on short seasonal series can leave a numerically nonzero, near-zero MAD.
+    # Compare to floating-point precision at the observed magnitude, not literal 0.
+    tolerance = np.finfo(float).eps * 256 * max(float(values.abs().max()), np.finfo(float).tiny)
+    scale = 1.4826 * mad if 1.4826 * mad > tolerance else values.std(ddof=0)
     if not np.isfinite(scale) or scale == 0:
         return pd.Series(np.zeros(len(values)), index=values.index)
     return (values - median) / scale
@@ -213,11 +256,13 @@ def isolation_forest_score(series: pd.Series, window: int, context: pd.DataFrame
 
 
 def guess_period(freq: str, n: int) -> int:
-    if freq in {"D", "B"}:
+    if freq == "B":
+        return 5
+    if freq == "D":
         return 7
     if freq in {"H", "h"}:
         return 24
-    if freq in {"M", "MS"}:
+    if freq in {"M", "MS", "ME"}:
         return 12
     if freq in {"W", "W-SUN", "W-MON"}:
         return 52 if n >= 120 else 4
@@ -225,17 +270,20 @@ def guess_period(freq: str, n: int) -> int:
 
 
 def detect_anomalies(series: pd.Series, config: DetectionConfig, context: pd.DataFrame | None = None) -> pd.DataFrame:
-    period = guess_period(config.freq, len(series))
+    period = config.period or guess_period(config.freq, len(series))
+    stl_available = config.use_stl and len(series) >= max(24, period * 2)
+    isolation_available = config.use_isolation_forest and len(series) >= 20
     rz = rolling_z_score(series, config.window).abs()
     iq = iqr_score(series, config.window)
-    stl_component = stl_score(series, period) if config.use_stl else pd.Series(0.0, index=series.index)
+    stl_component = stl_score(series, period) if stl_available else pd.Series(0.0, index=series.index)
     iso_component = (
         isolation_forest_score(series, config.window, context)
-        if config.use_isolation_forest
+        if isolation_available
         else pd.Series(0.0, index=series.index)
     )
 
-    score = (0.38 * rz) + (0.22 * iq) + (0.24 * stl_component) + (0.16 * iso_component)
+    active_weight = .60 + (.24 if stl_available else 0) + (.16 if isolation_available else 0)
+    score = ((0.38 * rz) + (0.22 * iq) + (0.24 * stl_component) + (0.16 * iso_component)) / active_weight
     threshold = max(float(np.nanquantile(score, config.sensitivity)), 2.0)
 
     result = pd.DataFrame(
@@ -255,14 +303,23 @@ def detect_anomalies(series: pd.Series, config: DetectionConfig, context: pd.Dat
         + (result["stl_score"] >= 2.5).astype(int)
         + (result["isolation_score"] >= 2.2).astype(int)
     )
-    result["is_anomaly"] = (result["anomaly_score"] >= threshold) | (result["method_votes"] >= 3)
+    result["level_shift_score"] = level_shift_signal(series, period, config.window).to_numpy() if config.use_level_shift else 0.0
+    result["is_level_shift"] = result["level_shift_score"] >= 3.5
+    result["is_anomaly"] = (result["anomaly_score"] >= threshold) | (result["method_votes"] >= 3) | result["is_level_shift"]
     result["severity"] = pd.cut(
         result["anomaly_score"],
         bins=[-np.inf, threshold, threshold * 1.35, threshold * 1.85, np.inf],
         labels=["정상", "관찰", "주의", "위험"],
         include_lowest=True,
     ).astype(str)
+    result.loc[result["is_anomaly"] & result["severity"].eq("정상"), "severity"] = "관찰"
+    result.loc[~result["is_anomaly"], "severity"] = "정상"
+    result["threshold"] = threshold
+    result["active_methods"] = 2 + int(stl_available) + int(isolation_available)
     result = add_explanations(result, series, config, context)
+    shifted = result["is_level_shift"]
+    result.loc[shifted, "anomaly_type"] = "지속 수준 변화"
+    result.loc[shifted, "reason"] += "; 구간 중앙값이 추세·계절 조정 기준에서 이탈 (수준 변화 기준 3.5 이상)"
     return result
 
 
@@ -277,6 +334,10 @@ def add_explanations(
     rolling_std = series.rolling(config.window, min_periods=max(4, config.window // 3), center=True).std()
     rolling_median = rolling_median.bfill().ffill().reset_index(drop=True)
     rolling_std = rolling_std.replace(0, np.nan).bfill().ffill().reset_index(drop=True)
+    changes = values.diff()
+    local_volatility = changes.abs().rolling(config.window, min_periods=3).mean()
+    global_vol = changes.abs().mean()
+    context_scores = context.apply(robust_z_score) if context is not None and not context.empty else None
 
     anomaly_types: list[str] = []
     reasons: list[str] = []
@@ -289,10 +350,9 @@ def add_explanations(
         local_std = rolling_std.iloc[i]
         direction = "above" if value >= baseline else "below"
         delta = value - baseline
-        prev_delta = values.diff().iloc[i] if i > 0 else np.nan
-        next_delta = values.diff().iloc[i + 1] if i + 1 < len(values) else np.nan
-        local_vol = series.diff().abs().rolling(config.window, min_periods=3).mean().iloc[i]
-        global_vol = series.diff().abs().mean()
+        prev_delta = changes.iloc[i] if i > 0 else np.nan
+        next_delta = changes.iloc[i + 1] if i + 1 < len(values) else np.nan
+        local_vol = local_volatility.iloc[i]
 
         if abs(prev_delta) > 2 * (local_std if np.isfinite(local_std) else 1) and abs(next_delta) > abs(prev_delta) * 0.5:
             anomaly_type = "단일 시점 급등/급락"
@@ -308,14 +368,19 @@ def add_explanations(
         reason_bits = [
             f"국소 기준선 대비 {'높음' if direction == 'above' else '낮음'}: {delta:.2f}",
             f"종합 이상 점수 {row['anomaly_score']:.2f}",
-            f"4개 기준 중 {int(row['method_votes'])}개가 이상 신호로 판단",
+            f"{int(row['active_methods'])}개 활성 기준 중 {int(row['method_votes'])}개가 이상 신호로 판단",
         ]
         if row["stl_score"] >= 2.5:
             reason_bits.append("반복 계절 패턴만으로 설명하기 어려움")
         if row["isolation_score"] >= 2.2:
             reason_bits.append("다변량 패턴 관점에서도 비정상적")
 
-        note = context_signal_note(context, i) if context is not None and not context.empty else "참고 변수 미선택"
+        if context_scores is not None:
+            notes = [f"{col} 값이 평소보다 {'높음' if z > 0 else '낮음'}"
+                     for col, z in context_scores.iloc[i].items() if abs(z) >= 2]
+            note = "; ".join(notes) or "참고 변수에서 특이 신호 없음"
+        else:
+            note = "참고 변수 미선택"
         context_notes.append(note)
         anomaly_types.append(anomaly_type)
         reasons.append("; ".join(reason_bits))
@@ -352,10 +417,10 @@ def recommended_action(mode: str, anomaly_type: str, direction: str, context_not
     return "원천 데이터, 주변 관측치, 참고 변수를 함께 검토한 뒤 제거/유지 여부를 결정하세요."
 
 
-def describe_series(series: pd.Series, detected: pd.DataFrame, meta: dict[str, float | int | str]) -> pd.DataFrame:
+def describe_series(series: pd.Series, detected: pd.DataFrame, meta: dict[str, float | int | str], period_override: int | None = None) -> pd.DataFrame:
     values = series.dropna()
     anomaly_count = int(detected["is_anomaly"].sum())
-    period = guess_period(str(meta["frequency"]), len(series))
+    period = period_override or guess_period(str(meta["frequency"]), len(series))
     trend_strength, seasonality_strength = decomposition_strength(series, period)
     adf_p = np.nan
     if len(values) >= 12 and values.nunique() > 1:
@@ -680,6 +745,9 @@ def score_chart(detected: pd.DataFrame) -> go.Figure:
         row=2,
         col=1,
     )
+    if "threshold" in detected:
+        fig.add_hline(y=float(detected["threshold"].iloc[0]), line_dash="dash", line_color=THEME["coral_dark"],
+                      annotation_text="종합 점수 임계값", row=1, col=1)
     apply_plot_theme(fig, 520)
     fig.update_layout(title="종합 이상 점수와 분포")
     fig.update_yaxes(title="점수", row=1, col=1)
@@ -721,7 +789,7 @@ def anomaly_type_chart(detected: pd.DataFrame) -> go.Figure:
         go.Bar(
             x=counts["유형"],
             y=counts["개수"],
-            marker_color=[THEME["coral"], THEME["mint_strong"], "#f2c078", "#8ab6a8", "#6f7689"][: len(counts)],
+            marker_color=[THEME["coral"], THEME["mint_strong"], "#f2c078", "#8ab6a8", "#6f7689", "#7b4cc2"][: len(counts)],
         )
     )
     apply_plot_theme(fig, 330)
@@ -780,8 +848,8 @@ def acf_pacf_chart(series: pd.Series) -> go.Figure:
     return enforce_plot_text_color(fig)
 
 
-def stl_decomposition_chart(series: pd.Series, freq: str) -> go.Figure:
-    period = guess_period(freq, len(series))
+def stl_decomposition_chart(series: pd.Series, freq: str, period_override: int | None = None) -> go.Figure:
+    period = period_override or guess_period(freq, len(series))
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.04)
     values = series.dropna()
     if len(values) >= max(24, period * 2):
@@ -834,6 +902,8 @@ def make_report(
         f"- 참고 변수: `{', '.join(context_cols) if context_cols else '없음'}`",
         f"- 분석 모드: `{config.business_mode}`",
         f"- 시간 주기: `{config.freq}`",
+        f"- 계절 주기: `{config.period or '자동'}`",
+        f"- 수준 변화 탐지: `{config.use_level_shift}`",
         f"- 이동 창: `{config.window}`",
         f"- 민감도 분위수: `{config.sensitivity:.2f}`",
         "",
@@ -886,6 +956,12 @@ def inject_style() -> None:
             font-family: 'Noto Sans KR', 'Segoe UI', sans-serif;
         }
 
+        .stMarkdown, .stMarkdown p, .stMarkdown li, .kpi-card,
+        .top-pill, .page-heading, [data-testid="stHeading"] {
+            word-break: keep-all;
+            overflow-wrap: normal;
+        }
+
         .stApp {
             background:
                 linear-gradient(175deg, rgba(183, 205, 199, .55) 0 18%, transparent 18%),
@@ -916,6 +992,26 @@ def inject_style() -> None:
 
         [data-testid="stSidebar"] section {
             background: transparent;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] button,
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] button * {
+            color: #ffffff !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] button {
+            background-color: #343342 !important;
+            border: 1px solid #9595a5 !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] button:hover {
+            background-color: #454456 !important;
+            border-color: #ffffff !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stFileUploader"] button:focus-visible {
+            outline: 2px solid #b7dfa8;
+            outline-offset: 3px;
         }
 
         [data-testid="stSidebar"] [data-baseweb="select"] > div,
@@ -1049,6 +1145,8 @@ def inject_style() -> None:
             line-height: 1;
         }
 
+        .kpi-value.compact { font-size: 1.4rem; white-space: nowrap; }
+
         .kpi-caption {
             color: var(--muted);
             font-weight: 800;
@@ -1173,16 +1271,16 @@ def render_top_header(value_col: str, context_cols: list[str]) -> None:
                     <div class="brand-mark">TS</div>
                     <div>
                         <div class="brand-title">ANOMALY INTELLIGENCE</div>
-                        <div class="brand-subtitle">시계열분석 프로젝트 2</div>
+                        <div class="brand-subtitle">데이터 이해 · 이상탐지 · 검토 의사결정</div>
                     </div>
                 </div>
-                <div class="top-pill">대상 컬럼: {value_col} · {context_text}</div>
-                <div class="student-badge">C321083 김태환</div>
+                <div class="top-pill">대상 컬럼: {escape(str(value_col))} · {context_text}</div>
+                <div class="student-badge">김태환 · Portfolio</div>
             </div>
             <div class="page-heading">
                 <div>
                     <h1>이상탐지 대시보드</h1>
-                    <p>CSV 업로드, 자동 탐지, 강의 기반 진단, 설명형 검토 리포트를 한 화면에서 확인합니다.</p>
+                    <p>데이터의 특성을 이해하고, 이상 후보의 근거와 다음 검토 행동을 확인하세요.</p>
                 </div>
             </div>
         </div>
@@ -1191,13 +1289,13 @@ def render_top_header(value_col: str, context_cols: list[str]) -> None:
     )
 
 
-def render_kpi_card(title: str, value: str, caption: str, icon: str, tone: str = "dark") -> None:
+def render_kpi_card(title: str, value: str, caption: str, icon: str, tone: str = "dark", compact: bool = False) -> None:
     st.markdown(
         f"""
         <div class="kpi-card">
             <div class="kpi-head">{title}</div>
             <div class="kpi-body">
-                <div class="kpi-value">{value}</div>
+                <div class="kpi-value{' compact' if compact else ''}">{escape(value)}</div>
                 <div class="kpi-icon {tone}">{icon}</div>
             </div>
             <div class="kpi-caption">{caption}</div>
@@ -1207,11 +1305,11 @@ def render_kpi_card(title: str, value: str, caption: str, icon: str, tone: str =
     )
 
 
-def stretch_plotly_chart(fig: go.Figure) -> None:
+def stretch_plotly_chart(fig: go.Figure, key: str | None = None) -> None:
     try:
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, width="stretch", key=key)
     except TypeError:
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=key)
 
 
 def stretch_dataframe(data: pd.DataFrame, hide_index: bool = False) -> None:
@@ -1228,7 +1326,18 @@ def main() -> None:
     with st.sidebar:
         st.header("입력 데이터")
         uploaded_file = st.file_uploader("CSV 파일", type=["csv"])
-        df = read_csv(uploaded_file)
+        try:
+            df = read_csv(uploaded_file)
+        except Exception as exc:
+            st.error(f"CSV를 읽지 못했습니다: {exc}")
+            return
+
+        with st.expander("데이터 배경 정보", expanded=False):
+            company = st.text_input("기업·기관명 (선택)", help="사용자가 제공한 이름만 표시합니다. 수치만으로 기업을 추정하지 않습니다.")
+            description = st.text_area("지표 설명·단위·출처 (선택)")
+            domain_override = st.selectbox("분야 확인·수정", ["자동 추정", *DOMAIN_TERMS, "일반·미확인"])
+        filename = uploaded_file.name if uploaded_file is not None else "내장 합성 수요 데이터"
+        profile = infer_profile(df, filename, description, company, domain_override)
 
         dt_cols = candidate_datetime_columns(df)
         num_cols = candidate_numeric_columns(df)
@@ -1240,13 +1349,20 @@ def main() -> None:
             return
 
         time_col = st.selectbox("시간 컬럼", dt_cols, index=0)
+        num_cols = [col for col in num_cols if col != time_col]
+        if not num_cols:
+            st.error("시간 컬럼 이외의 수치 컬럼이 필요합니다.")
+            return
         value_default = 0 if num_cols[0] != time_col else min(1, len(num_cols) - 1)
         value_col = st.selectbox("분석 대상 값 컬럼", num_cols, index=value_default)
         context_options = [col for col in num_cols if col not in {time_col, value_col}]
         context_cols = st.multiselect("원인 힌트용 참고 변수", context_options, default=context_options[:2])
 
         st.header("탐지 설정")
-        freq = st.selectbox("시간 주기", ["auto", "D", "W", "M", "H"], index=0)
+        freq = st.selectbox("시간 주기", ["auto", "D", "W", "ME", "h"], index=0)
+        aggregation_label = st.selectbox("중복·주기 변환 집계", ["평균", "합계", "마지막 값"],
+                                         help="매출·건수는 합계, 센서 측정은 평균, 잔액은 마지막 값처럼 지표 정의에 맞게 선택하세요.")
+        aggregation = {"평균": "mean", "합계": "sum", "마지막 값": "last"}[aggregation_label]
         window = st.slider("이동 창 크기", min_value=5, max_value=90, value=21, step=2)
         sensitivity_label = st.select_slider(
             "탐지 민감도",
@@ -1256,15 +1372,19 @@ def main() -> None:
         sensitivity_map = {"낮음": 0.985, "보통": 0.965, "높음": 0.94, "매우 높음": 0.90}
         use_stl = st.toggle("STL 잔차 점수 사용", value=True)
         use_iforest = st.toggle("다변량 Isolation Forest 사용", value=True)
-        business_mode = st.selectbox(
+        use_level_shift = st.toggle("지속 수준 변화 탐지", value=True,
+                                    help="추세·계절을 조정한 뒤 인접 구간의 중앙값 변화를 비교하는 회고적 탐지입니다.")
+        period_mode = st.selectbox("계절 주기 설정", ["자동", "직접 지정"])
+        period_override = int(st.number_input("계절 주기 (관측치 수)", min_value=2, max_value=10000, value=7)) if period_mode == "직접 지정" else None
+        business_mode_choice = st.selectbox(
             "검토 모드",
-            ["수요/매출", "운영/센서", "금융/리스크", "일반"],
+            ["분야에 맞게 자동 선택", "수요/매출", "운영/센서", "금융/리스크", "일반"],
             index=0,
         )
 
     try:
-        series, meta = prepare_series(df, time_col, value_col, freq)
-        context = prepare_context_frame(df, time_col, context_cols, series.index)
+        series, meta = prepare_series(df, time_col, value_col, freq, aggregation)
+        context = prepare_context_frame(df, time_col, context_cols, series.index, str(meta["frequency"]))
     except Exception as exc:
         st.error(f"시계열 전처리에 실패했습니다: {exc}")
         return
@@ -1279,19 +1399,37 @@ def main() -> None:
         sensitivity=sensitivity_map[sensitivity_label],
         use_stl=use_stl,
         use_isolation_forest=use_iforest,
-        business_mode=business_mode,
+        business_mode=DOMAIN_MODES.get(profile.domain, "일반") if business_mode_choice == "분야에 맞게 자동 선택" else business_mode_choice,
+        period=period_override,
+        use_level_shift=use_level_shift,
     )
-    detected = detect_anomalies(series, config, context)
-    metrics = describe_series(series, detected, meta)
+    try:
+        detected = detect_anomalies(series, config, context)
+    except Exception as exc:
+        st.error(f"탐지에 실패했습니다. 데이터 범위와 설정을 확인하세요: {exc}")
+        return
+    metrics = describe_series(series, detected, meta, config.period)
+    raw_data = uploaded_file.getvalue() if uploaded_file is not None else df.to_csv(index=False).encode("utf-8")
+    manifest = make_manifest(raw_data, filename, config,
+                             {"time_column": time_col, "frequency": meta["frequency"], "aggregation": aggregation,
+                              "interpolation": "time-bidirectional", "seasonal_period_used": config.period or guess_period(config.freq, len(series)),
+                              "metadata": meta}, value_col, context_cols,
+                             {"domain": profile.domain, "company": profile.company, "description": profile.description})
+    analysis_id = manifest["analysis_id"]
+    review_store = st.session_state.setdefault("review_records", {})
+    reviews = review_store.setdefault(analysis_id, {})
+    effective_period = config.period or guess_period(config.freq, len(series))
+    if len(series) < max(24, 2 * effective_period) and config.use_stl:
+        st.warning(f"계절 주기 {effective_period}에 비해 관측치가 부족해 STL 탐지·분해를 생략합니다. 최소 {max(24, 2 * effective_period)}개가 필요합니다.")
     briefing = generate_analysis_briefing(series, detected, metrics, value_col, config, context_cols)
     visual_insights = generate_visual_insights(detected, metrics)
     quality_summary = data_quality_summary(meta, metrics, detected)
     anomaly_count = int(detected["is_anomaly"].sum())
     anomaly_rate = anomaly_count / len(detected)
     latest = detected[detected["is_anomaly"]].tail(1)
-    latest_text = "none" if latest.empty else str(latest.iloc[0]["timestamp"])
 
     render_top_header(value_col, context_cols)
+    st.caption(f"{filename} · 회고적 일괄 분석 · 분야 추정은 컬럼·파일명·설명에 근거합니다.")
 
     k1, k2, k3, k4, k5 = st.columns(5)
     with k1:
@@ -1303,18 +1441,61 @@ def main() -> None:
     with k4:
         render_kpi_card("참고 변수", f"{len(context_cols):,}", "다변량 분석 입력", "+", "dark")
     with k5:
-        render_kpi_card("최근 이상치", latest_text[:16], "가장 마지막 탐지 시점", "⌁", "coral")
+        latest_date = "없음" if latest.empty else latest.iloc[0]["timestamp"].strftime("%m.%d")
+        latest_caption = "탐지된 시점 없음" if latest.empty else latest.iloc[0]["timestamp"].strftime("%Y년 · %H:%M")
+        render_kpi_card("최근 이상치", latest_date, latest_caption, "⌁", "coral", compact=True)
 
     tabs = st.tabs(
         [
+            "데이터 이해",
             "대시보드",
             "이상치 검토",
-            "평가지표",
+            "데이터 진단 지표",
             "시계열 진단",
             "데이터 미리보기",
+            "성능 검증",
         ]
     )
     with tabs[0]:
+        st.subheader("이 데이터는 무엇인가요?")
+        a, b = st.columns([1, 1])
+        with a:
+            st.markdown(f"**분야:** {profile.domain}")
+            st.write(f"판단 상태: {profile.certainty}")
+            st.write("판단 단서: " + (", ".join(profile.evidence) or "일치하는 분야 용어 없음"))
+        with b:
+            st.write(f"기업·기관: {profile.company}")
+            st.caption("기업명은 사용자 제공 정보이며 별도로 검증하지 않습니다.")
+            st.write(profile.description or "지표 설명과 단위를 입력하면 분야 판단과 검토에 도움이 됩니다.")
+        st.write(f"분석 기간: {series.index.min():%Y-%m-%d %H:%M} ~ {series.index.max():%Y-%m-%d %H:%M} · "
+                 f"원본 {len(df):,}행 / {len(df.columns)}개 컬럼 · 분석 {len(series):,}개 시점 · 주기 {meta['frequency']} · 집계 {aggregation_label}")
+        if meta["frequency"] == "irregular":
+            st.warning("시점이 불규칙합니다. ACF와 STL은 행 간격을 기준으로 계산하므로 시간 주기를 먼저 확인하세요.")
+        if uploaded_file is None:
+            st.info("현재 데이터는 시연용 합성 데이터입니다. 실제 기업의 데이터가 아닙니다.")
+        findings = build_findings(series, detected, metrics, meta, context, profile)
+        st.subheader("핵심 발견과 다음 행동")
+        for finding in findings:
+            with st.container(border=True):
+                st.markdown(f"**{finding['제목']}**")
+                for label in ("관측 사실", "검토 가설", "다음 행동"):
+                    st.write(f"{label}: {finding[label]}")
+        st.subheader("이 데이터로 답할 수 있는 질문")
+        questions = question_catalog(profile)
+        question = st.radio("확인할 질문", list(questions), label_visibility="collapsed")
+        explanation, action = questions[question]
+        st.write(explanation)
+        st.info(action)
+        if question == "어느 시점을 먼저 검토해야 할까?":
+            stretch_plotly_chart(line_chart(detected), key="question_candidates")
+        elif question == "반복 패턴을 벗어난 변화일까?":
+            stretch_plotly_chart(stl_decomposition_chart(series, config.freq, config.period), key="question_seasonality")
+        else:
+            st.write("정답 라벨 없이 이상 후보 개수만으로 정확도를 판단할 수 없습니다. 성능 검증 탭에서 합성 데이터 평가를 확인하세요.")
+        st.download_button("데이터 이해·검토 계획 다운로드", profile_report(profile, findings).encode("utf-8-sig"),
+                           file_name="dataset_review.md", mime="text/markdown")
+
+    with tabs[1]:
         st.subheader("분석 브리핑")
         st.markdown(briefing)
         with st.expander("시각화 해석 가이드", expanded=True):
@@ -1331,7 +1512,61 @@ def main() -> None:
             stretch_plotly_chart(component_chart(detected))
             st.caption("기준별 점수는 국소 이탈, IQR, 계절성 잔차, 다변량 고립 기준 중 어떤 신호가 강했는지 보여줍니다.")
 
-    with tabs[1]:
+    with tabs[2]:
+        st.subheader("이상 후보 상세 검토")
+        candidates = detected[detected["is_anomaly"]].sort_values("anomaly_score", ascending=False)
+        if candidates.empty:
+            st.info("현재 설정의 이상 후보가 없습니다. 대시보드에서 전체 점수와 주기를 확인하세요.")
+        else:
+            selected_index = st.selectbox("검토할 이상 시점", candidates.index.tolist(),
+                format_func=lambda idx: f"{detected.loc[idx, 'timestamp']:%Y-%m-%d %H:%M} · {detected.loc[idx, 'anomaly_type']}")
+            selected = detected.loc[selected_index]
+            timestamp_key = selected["timestamp"].isoformat()
+            radius = config.window
+            neighborhood = detected.iloc[max(0, selected_index - radius):selected_index + radius + 1]
+            baseline = series.rolling(config.window, center=True, min_periods=1).median()
+            detail = line_chart(neighborhood)
+            detail.add_trace(go.Scatter(x=neighborhood.timestamp, y=baseline.iloc[neighborhood.index],
+                                       name="국소 중앙값 기준선", line=dict(dash="dot", color="#3f7f77")))
+            detail.add_trace(go.Scatter(x=[selected.timestamp], y=[selected.value], mode="markers", name="선택한 후보",
+                                       marker=dict(size=18, symbol="circle-open", color=THEME["coral_dark"])))
+            detail.update_layout(title=dict(text="선택 시점과 주변 흐름", x=.01, y=.98),
+                                 margin=dict(l=10, r=10, t=100, b=16),
+                                 legend=dict(x=0, y=1.04, xanchor="left", yanchor="bottom"))
+            stretch_plotly_chart(detail, key="selected_anomaly_detail")
+            st.write(f"종합 점수 {selected.anomaly_score:.3f} / 임계값 {selected.threshold:.3f} · "
+                     f"기준 동의 {int(selected.method_votes)}개 · 수준 변화 점수 {selected.level_shift_score:.3f} / 기준 3.5")
+            st.caption("종합 점수 임계값, 세 기준 이상의 동의, 수준 변화 중 하나를 충족하면 이상 후보가 됩니다.")
+            st.write(f"탐지 근거: {selected.reason}")
+            st.write(f"참고 변수: {selected.context_note}")
+            st.write(f"권장 검토: {selected.recommended_action}")
+            decisions = ["판단 보류", "실제 이상", "정상·오탐"]
+            existing = reviews.get(timestamp_key, {})
+            with st.form(f"review_{analysis_id}_{timestamp_key}"):
+                decision = st.radio("검토 판단", decisions, index=decisions.index(existing.get("decision", "판단 보류")))
+                note = st.text_area("검토 메모", value=existing.get("note", ""), max_chars=4000)
+                if st.form_submit_button("검토 기록 저장"):
+                    reviews[timestamp_key] = {"decision": decision, "note": note}
+                    st.success("이 분석의 검토 기록을 세션에 저장했습니다. 새로고침 전 JSON으로 내려받으세요.")
+        st.caption("검토 기록은 현재 세션에서 데이터·분석 조건별로 분리됩니다. 영구 보관하려면 JSON을 다운로드하고 같은 조건에서 다시 불러오세요.")
+        if reviews:
+            stretch_dataframe(pd.DataFrame([{"시점": ts, "판단": record["decision"], "메모": record["note"]}
+                                            for ts, record in reviews.items()]), hide_index=True)
+        st.download_button("검토 기록 JSON 다운로드", json.dumps({"schema_version": 1, "analysis_id": analysis_id,
+                           "reviews": reviews}, ensure_ascii=False, indent=2).encode("utf-8"),
+                           file_name="review_records.json", mime="application/json")
+        restore_file = st.file_uploader("검토 기록 복원 (JSON)", type=["json"], key=f"restore_{analysis_id}")
+        if restore_file is not None and st.button("검토 기록 불러오기"):
+            try:
+                restored = restore_reviews(json.loads(restore_file.getvalue()), manifest)
+                valid_times = set(detected.timestamp.map(lambda value: value.isoformat()))
+                if not set(restored).issubset(valid_times):
+                    raise ValueError("현재 분석에 없는 시점이 포함되어 있습니다.")
+                reviews.update(restored)
+                st.rerun()
+            except (ValueError, TypeError, KeyError) as exc:
+                st.error(f"검토 기록을 복원하지 못했습니다: {exc}")
+        st.divider()
         c1, c2 = st.columns([1.15, 0.85])
         anomalies = detected[detected["is_anomaly"]].sort_values("anomaly_score", ascending=False)
         with c1:
@@ -1353,11 +1588,15 @@ def main() -> None:
 
         st.download_button(
             "이상탐지 결과 CSV 다운로드",
-            data=dataframe_to_csv_bytes(detected),
+            data=dataframe_to_csv_bytes(detected.assign(analysis_id=analysis_id,
+                 review_decision=detected.timestamp.map(lambda value: reviews.get(value.isoformat(), {}).get("decision", "미검토")),
+                 review_note=detected.timestamp.map(lambda value: reviews.get(value.isoformat(), {}).get("note", "")))),
             file_name=f"anomaly_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
         )
         report = make_report(detected, metrics, time_col, value_col, config, context_cols)
+        report += f"\n\n## 분석 식별\n- 분석 ID: {analysis_id}\n- 파일 SHA-256: {manifest['dataset_sha256']}\n"
+        report += "\n## 검토 기록\n" + ("\n".join(f"- {ts}: {record['decision']} / {record['note']}" for ts, record in reviews.items()) or "- 미검토")
         st.download_button(
             "분석 리포트 다운로드",
             data=report.encode("utf-8-sig"),
@@ -1365,13 +1604,20 @@ def main() -> None:
             mime="text/markdown",
         )
 
-    with tabs[2]:
+    with tabs[3]:
+        st.subheader("분석 재현 조건")
+        st.write(f"분석 ID: {analysis_id[:16]} · 파일 SHA-256: {manifest['dataset_sha256'][:16]}")
+        st.write(f"실제 사용 계절 주기: {effective_period}개 관측치 · 수준 변화 탐지: {'사용' if config.use_level_shift else '미사용'}")
+        st.download_button("분석 조건 JSON 다운로드", json.dumps(manifest, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
+                           file_name="analysis_manifest.json", mime="application/json")
+        with st.expander("분석 조건 전체 보기"):
+            st.json(manifest)
         stretch_dataframe(metrics, hide_index=True)
         st.caption(
             "종합 이상 점수는 rolling z-score, IQR 거리, STL 잔차 점수, 다변량 Isolation Forest 점수를 결합해 계산합니다."
         )
 
-    with tabs[3]:
+    with tabs[4]:
         st.subheader("강의 기반 시계열 진단")
         st.write("정상성, 차분, 자기상관, 부분자기상관, STL 분해를 함께 확인해 이상탐지 결과의 배경 구조를 판단합니다.")
         d1, d2 = st.columns([0.9, 1.1])
@@ -1382,12 +1628,36 @@ def main() -> None:
         with d2:
             stretch_plotly_chart(acf_pacf_chart(series))
             st.caption("ACF/PACF는 시차별 의존성을 보여주며, AR/MA 구조 또는 계절 패턴 판단에 활용됩니다.")
-        stretch_plotly_chart(stl_decomposition_chart(series, config.freq))
+        stretch_plotly_chart(stl_decomposition_chart(series, config.freq, config.period))
         st.caption("STL 분해는 원시 시계열을 추세, 계절, 잔차로 나누어 계절성으로 설명되지 않는 이탈을 확인합니다.")
 
-    with tabs[4]:
+    with tabs[5]:
         st.write("업로드 파일, 분석 대상 컬럼, 참고 변수, 탐지 설정을 바꾸면 분석 결과가 자동으로 다시 계산됩니다.")
         stretch_dataframe(df.head(200))
+
+    with tabs[6]:
+        st.subheader("정답이 있는 합성 데이터로 탐지 성능 확인")
+        st.write("정상 패턴·단일 급등/급락·15일 지속 수준 변화의 세 시나리오를 각각 3개 seed로 평가합니다. "
+                 "주간 계절성, 상승 추세, 잡음을 포함한 일별 180개 관측치를 사용합니다.")
+        st.caption("현재 업로드 데이터의 정확도가 아닙니다. 전체 구간을 함께 분석하는 회고적 평가이며 실시간 탐지나 미래 일반화 성능을 보장하지 않습니다.")
+        st.write("비교 조건: 이동 창 21, 민감도 0.94, STL·Isolation Forest 사용. 기존 앙상블·수준 변화 추가·단독 방법의 3가지 조건을 비교합니다. 단독 기준은 |이동 창 z-score| ≥ 2.5입니다. "
+                 "시점별 TP·FP·FN으로 계산하며 정상 시나리오의 Recall·F1은 정의하지 않습니다.")
+        if st.button("재현 가능한 성능 평가 실행"):
+            with st.spinner("9개 합성 시계열을 평가하고 있습니다."):
+                benchmark_config = DetectionConfig("D", 21, .94, True, True, "일반")
+                st.session_state["synthetic_evaluation"] = run_benchmark(detect_anomalies, rolling_z_score, benchmark_config)
+        if "synthetic_evaluation" in st.session_state:
+            evaluated = st.session_state["synthetic_evaluation"]
+            stretch_dataframe(evaluated, hide_index=True)
+            st.download_button("평가 결과 CSV 다운로드", dataframe_to_csv_bytes(evaluated),
+                               file_name="synthetic_benchmark.csv", mime="text/csv")
+        st.markdown("**해석의 한계**")
+        st.write("가중치·임계값은 휴리스틱이며, 시나리오마다 유리한 방법이 달라질 수 있습니다. "
+                 "실제 운영 데이터의 라벨과 별도 검증 구간을 확보한 뒤 설정을 선택해야 합니다. "
+                 "중심 이동 창과 STL은 미래 관측값도 사용하므로 현재 앱은 실시간 경보용이 아닙니다.")
+        st.caption("수준 변화 탐지는 선형 추세와 계절 위상 중앙값을 제거한 뒤 인접 구간 중앙값 변화로 경계를 제안합니다. "
+                   "구간 중앙값의 이탈이 잡음 척도의 3.5배 이상이고 최소 구간 길이를 만족할 때 후보로 추가합니다. "
+                   "느린 비선형 추세나 짧은 데이터에서는 오탐·미탐이 남을 수 있습니다.")
 
 
 if __name__ == "__main__":

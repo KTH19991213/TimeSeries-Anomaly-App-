@@ -83,3 +83,10 @@ To complete the online submission:
 - Compared three methods across nine synthetic cases (27 raw rows). Sustained-shift mean F1: previous 0.260, added method 0.788; mean false positives: 5.667 to 6.667. No claim of real-world accuracy.
 - Twenty automated tests passed, including extra seeds 127 and 2026, review/manifest roundtrip and mismatched-analysis rejection.
 - Browser verified review save, JSON download and reload/import workflow. Deployment remains unchanged; source and ZIP are local.
+
+## 2026-10-17 GitHub and Streamlit Release
+
+- Published the portfolio revision to GitHub main and verified the public Streamlit URL.
+- Initial exact local dependency pins failed to build older PyArrow/NumPy on the cloud Python 3.14.8 runtime. Restored compatible ranges and rebooted from the authenticated management panel; dependency installation and app startup succeeded.
+- Verified deployed dataset understanding, anomaly drill-down, review save, manifest download and 27-row benchmark execution. Deployed benchmark means match the documented local results.
+- Added current Streamlit React Aria sidebar styling so select arrows and multiselect controls retain contrast on the dark sidebar.

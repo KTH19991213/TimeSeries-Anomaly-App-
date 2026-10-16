@@ -1015,6 +1015,10 @@ def inject_style() -> None:
         }
 
         [data-testid="stSidebar"] [data-baseweb="select"] > div,
+        [data-testid="stSidebar"] .react-aria-ComboBox [role="group"],
+        [data-testid="stSidebar"] [role="group"]:has(> [data-testid="stMultiSelectTagsContainer"]),
+        [data-testid="stSidebar"] button[aria-label="Open"],
+        [data-testid="stSidebar"] button[aria-label="Clear all"],
         [data-testid="stSidebar"] textarea,
         [data-testid="stSidebar"] input {
             background: #343342 !important;

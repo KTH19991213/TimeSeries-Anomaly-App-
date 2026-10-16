@@ -99,4 +99,4 @@ python -m unittest test_workflow -v
 
 후속 개선: 실제 라벨 데이터의 별도 검증 구간, 검토 기록을 이용한 임계값 교정, 계정별 영구 저장, 분석 조건 JSON의 자동 적용, 비선형 추세·장기 수준 변화 평가. 선택 후보의 검토 기록은 전체 정답 라벨이 아니므로 실제 데이터의 Recall을 계산하는 데 그대로 사용할 수 없습니다.
 
-검증 환경: Streamlit 1.51.0 / pandas 2.3.3 / NumPy 2.2.6 / scikit-learn 1.6.1 / Plotly 6.3.0 / statsmodels 0.14.5. 배포 재현성을 위해 의존성 파일은 검증한 버전으로 고정했습니다. Python 버전과 실행 환경에 따라서도 결과가 달라질 수 있습니다.
+검증 환경: Streamlit 1.51.0 / pandas 2.3.3 / NumPy 2.2.6 / scikit-learn 1.6.1 / Plotly 6.3.0 / statsmodels 0.14.5. 배포 환경의 Python에서 설치 가능한 버전을 선택하도록 의존성은 호환 범위를 사용합니다. 실행 환경의 실제 버전은 분석 조건 JSON에 기록하며, Python·라이브러리 버전에 따라 결과가 달라질 수 있습니다.
